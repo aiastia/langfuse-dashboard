@@ -1,0 +1,9 @@
+name = "langfuse-dashboard"
+compatibility_date = "2024-12-01"
+pages_build_output_dir = "dist"
+
+# 本地开发密钥（不要提交真实密钥到 git！用 .dev.vars）
+# 部署时在 CF Dashboard → Settings → Environment Variables 配置：
+#   LANGFUSE_HOST        = https://jp.cloud.langfuse.com
+#   LANGFUSE_PUBLIC_KEY  = pk-lf-xxxx
+#   LANGFUSE_SECRET_KEY  = sk-lf-xxxx

@@ -1,0 +1,5 @@
+# 本地开发用的 Langfuse 密钥（复制为 .dev.vars 填入真实值）
+# .dev.vars 已在 .gitignore 中，不会被提交
+LANGFUSE_HOST=https://jp.cloud.langfuse.com
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
