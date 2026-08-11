@@ -101,7 +101,7 @@ export function slimTrace(t) {
   };
 }
 
-// 精简 observation 详情
+// 精简 observation 详情（旧版 v1 端点结构）
 export function slimObservation(o) {
   return {
     id: o.id,
@@ -122,5 +122,53 @@ export function slimObservation(o) {
     outputTokens: o.usage?.output || 0,
     totalTokens: o.usage?.total || 0,
     parentId: o.parentId || null,
+  };
+}
+
+/**
+ * 精简 v2 observations 端点的返回行。
+ * v2 字段结构与 v1 不同：
+ *  - model → providedModelName
+ *  - usage → inputUsage / outputUsage / totalUsage（数量）；cost 在 usage group 里
+ *  - latency/cost → 在 metrics group（calculatedLatency / calculatedTotalCost）
+ *  - input/output → 在 io group，返回为 raw string（需尝试 JSON.parse）
+ *  - parentId → parentObservationId
+ */
+export function slimObservationV2(o) {
+  // v2 的 input/output 是 raw string，尝试解析为 JSON 以便前端展示
+  function parseIO(raw) {
+    if (raw == null) return undefined;
+    if (typeof raw !== 'string') return raw;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw; // 非 JSON 字符串原样返回
+    }
+  }
+
+  const usage = {
+    input: o.inputUsage || 0,
+    output: o.outputUsage || 0,
+    total: o.totalUsage || 0,
+  };
+
+  return {
+    id: o.id,
+    type: o.type,
+    name: o.name || '',
+    model: o.providedModelName || o.internalModelId || '',
+    startTime: o.startTime,
+    endTime: o.endTime,
+    latency: o.calculatedLatency || 0,
+    cost: o.calculatedTotalCost || 0,
+    level: o.level || 'DEFAULT',
+    input: parseIO(o.input),
+    output: parseIO(o.output),
+    metadata: o.metadata || {},
+    usage,
+    inputTokens: usage.input,
+    outputTokens: usage.output,
+    totalTokens: usage.total,
+    parentId: o.parentObservationId || null,
   };
 }
