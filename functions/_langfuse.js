@@ -1,6 +1,7 @@
 /**
  * Langfuse API 代理公共辅助。
  * 密钥从 CF Pages 环境变量读取，绝不返回给前端。
+ * 全部使用 v2 API 端点（/api/public/v2/observations）。
  */
 
 /** 构造 Langfuse Basic Auth header */
@@ -45,6 +46,11 @@ export function json(data, status = 200, extraHeaders = {}) {
   });
 }
 
+/** 统一错误响应 */
+export function error(msg, status = 500) {
+  return json({ error: msg }, status);
+}
+
 /**
  * 边缘运行时短时内存缓存。
  * CF Pages Functions 每个 isolate 存活期内复用全局对象，
@@ -56,7 +62,6 @@ export function json(data, status = 200, extraHeaders = {}) {
  * @returns {Promise<{data: any, cacheHit: boolean}>}
  */
 export async function cached(key, ttl, fetcher) {
-  // isolate 级全局缓存表（首次调用时初始化）
   globalThis.__LF_CACHE__ = globalThis.__LF_CACHE__ || new Map();
   const store = globalThis.__LF_CACHE__;
   const now = Date.now();
@@ -66,7 +71,6 @@ export async function cached(key, ttl, fetcher) {
   }
   const data = await fetcher();
   store.set(key, { data, expire: now + ttl });
-  // 简易清理：超过 200 条时删除最旧的，防止内存膨胀
   if (store.size > 200) {
     const firstKey = store.keys().next().value;
     store.delete(firstKey);
@@ -74,75 +78,90 @@ export async function cached(key, ttl, fetcher) {
   return { data, cacheHit: false };
 }
 
-/** 统一错误响应 */
-export function error(msg, status = 500) {
-  return json({ error: msg }, status);
-}
+/**
+ * 从一组同 traceId 的 v2 observation 行聚合出一个 SlimTrace。
+ * v2 没有 trace 级端点，用 observation 行按 traceId 分组重建。
+ *
+ * @param {string} traceId
+ * @param {object[]} obsList  同一 traceId 下的 observation 行（v2 结构）
+ * @returns {object} SlimTrace
+ */
+export function slimTraceFromObservations(traceId, obsList) {
+  if (!obsList.length) {
+    return {
+      id: traceId,
+      name: traceId,
+      timestamp: '',
+      userId: '',
+      sessionId: '',
+      latency: 0,
+      totalCost: 0,
+      observationCount: 0,
+      runner: '',
+      projectId: '',
+      chapterNumber: '',
+      taskTitle: '',
+      tags: [],
+      environment: 'default',
+    };
+  }
 
-// 精简 trace 列表项：去掉 OTel 内部字段，只留前端需要的
-export function slimTrace(t) {
-  const meta = t.metadata || {};
+  // 按 startTime 找最早/最晚，近似 trace 的时间范围
+  const times = obsList
+    .map((o) => (o.startTime ? new Date(o.startTime).getTime() : 0))
+    .filter((t) => t > 0);
+  const minTime = times.length ? Math.min(...times) : 0;
+  const maxTime = times.length ? Math.max(...times) : 0;
+  const latency = minTime && maxTime ? (maxTime - minTime) / 1000 : 0;
+
+  // trace name：优先用 trace_context.traceName，否则取第一个 observation 的 name
+  const name =
+    obsList.find((o) => o.traceName)?.traceName ||
+    obsList[0].name ||
+    traceId;
+
+  // 从第一个含 metadata 的 observation 提取业务字段
+  const obsWithMeta = obsList.find((o) => o.metadata);
+  const meta = (obsWithMeta && obsWithMeta.metadata) || {};
+
+  // tags 从 trace_context 提取
+  const tags = obsList.find((o) => o.tags)?.tags || [];
+
   return {
-    id: t.id,
-    name: t.name || '未命名',
-    timestamp: t.timestamp,
-    userId: t.userId || '',
-    sessionId: t.sessionId || '',
-    latency: t.latency || 0,
-    totalCost: t.totalCost || 0,
-    observationCount: (t.observations || []).length,
-    // 从 metadata 提取业务字段
+    id: traceId,
+    name: name || '未命名',
+    timestamp: minTime ? new Date(minTime).toISOString() : '',
+    userId: obsList.find((o) => o.userId)?.userId || '',
+    sessionId: obsList.find((o) => o.sessionId)?.sessionId || '',
+    latency,
+    totalCost: obsList.reduce((a, o) => a + (o.calculatedTotalCost || 0), 0),
+    observationCount: obsList.length,
     runner: meta.runner || '',
     projectId: meta.project_id || '',
     chapterNumber: meta.chapter_number || '',
     taskTitle: meta.task_title || '',
-    tags: t.tags || [],
-    environment: t.environment || 'default',
-  };
-}
-
-// 精简 observation 详情（旧版 v1 端点结构）
-export function slimObservation(o) {
-  return {
-    id: o.id,
-    type: o.type, // TRACE / SPAN / GENERATION
-    name: o.name || '',
-    model: o.model || '',
-    startTime: o.startTime,
-    endTime: o.endTime,
-    latency: o.calculatedLatency || 0,
-    cost: o.calculatedTotalCost || 0,
-    level: o.level || 'DEFAULT',
-    input: o.input,
-    output: o.output,
-    metadata: o.metadata || {},
-    usage: o.usage || null,
-    // 找出 input/output 的 token 数
-    inputTokens: o.usage?.input || 0,
-    outputTokens: o.usage?.output || 0,
-    totalTokens: o.usage?.total || 0,
-    parentId: o.parentId || null,
+    tags,
+    environment: obsList.find((o) => o.environment)?.environment || 'default',
   };
 }
 
 /**
- * 精简 v2 observations 端点的返回行。
+ * 精简 v2 observations 端点的返回行（用于 trace 详情）。
  * v2 字段结构与 v1 不同：
  *  - model → providedModelName
- *  - usage → inputUsage / outputUsage / totalUsage（数量）；cost 在 usage group 里
- *  - latency/cost → 在 metrics group（calculatedLatency / calculatedTotalCost）
+ *  - usage → inputUsage / outputUsage / totalUsage
+ *  - latency/cost → 在 metrics group
  *  - input/output → 在 io group，返回为 raw string（需尝试 JSON.parse）
  *  - parentId → parentObservationId
  */
 export function slimObservationV2(o) {
-  // v2 的 input/output 是 raw string，尝试解析为 JSON 以便前端展示
   function parseIO(raw) {
     if (raw == null) return undefined;
     if (typeof raw !== 'string') return raw;
     try {
       return JSON.parse(raw);
     } catch {
-      return raw; // 非 JSON 字符串原样返回
+      return raw;
     }
   }
 

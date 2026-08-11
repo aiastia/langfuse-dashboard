@@ -2,14 +2,14 @@ import type { TraceListResponse, TraceDetail } from '../types'
 
 /**
  * 带超时与自动重试的请求封装。
- * - 超时：12 秒，用 AbortController 控制（CF Function 冷启动偶发偏慢）
+ * - 超时：15 秒（trace 详情含大量 observation 时可能较慢）
  * - 重试：首次请求失败时自动重试 1 次（冷启动首次偶发超时/502，重试通常命中已启动的 isolate）
  */
 async function api<T>(path: string, retries = 1): Promise<T> {
   let lastErr: unknown
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 12000)
+    const timer = setTimeout(() => controller.abort(), 15000)
     try {
       const resp = await fetch(path, { signal: controller.signal })
       clearTimeout(timer)
@@ -26,7 +26,6 @@ async function api<T>(path: string, retries = 1): Promise<T> {
       clearTimeout(timer)
       if (attempt === retries) throw e
       lastErr = e
-      // 短暂等待后重试（冷启动通常几百毫秒内恢复）
       await new Promise((r) => setTimeout(r, 400))
     }
   }
@@ -35,7 +34,7 @@ async function api<T>(path: string, retries = 1): Promise<T> {
 
 export interface TraceQuery {
   limit?: number
-  page?: number
+  cursor?: string
   name?: string
   fromTimestamp?: string
   toTimestamp?: string
@@ -43,7 +42,7 @@ export interface TraceQuery {
 }
 
 export function useLangfuse() {
-  /** 拉取 trace 列表 */
+  /** 拉取 trace 列表（v2 cursor 分页） */
   async function fetchTraces(query: TraceQuery = {}): Promise<TraceListResponse> {
     const sp = new URLSearchParams()
     for (const [k, v] of Object.entries(query)) {

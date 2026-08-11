@@ -8,11 +8,9 @@ import TraceDrawer from '../components/TraceDrawer.vue'
 const { fetchTraces } = useLangfuse()
 const loading = ref(false)
 const traces = ref<SlimTrace[]>([])
-const pagination = reactive({
-  current: 1,
-  pageSize: 50,
-  total: 0,
-})
+const hasMore = ref(false)
+const nextCursor = ref<string | null>(null)
+
 const filters = reactive({
   name: '' as string,
   dateRange: [] as string[],
@@ -41,21 +39,30 @@ function formatTime(iso: string) {
   return `${d.getMonth() + 1}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-async function load(page = 1) {
+async function load(reset = true) {
   loading.value = true
+  if (reset) {
+    traces.value = []
+    nextCursor.value = null
+  }
   try {
-    const query: any = { limit: pagination.pageSize, page }
+    const query: any = { limit: 50 }
+    if (!reset && nextCursor.value) query.cursor = nextCursor.value
     if (filters.name) query.name = filters.name
     if (filters.dateRange?.length === 2) {
       query.fromTimestamp = new Date(filters.dateRange[0]).toISOString()
       query.toTimestamp = new Date(filters.dateRange[1] + 'T23:59:59').toISOString()
     }
     const res = await fetchTraces(query)
-    traces.value = res.data
-    pagination.current = res.meta.page
-    pagination.total = res.meta.totalItems
+    if (reset) {
+      traces.value = res.data
+    } else {
+      traces.value.push(...res.data)
+    }
+    nextCursor.value = res.meta.nextCursor
+    hasMore.value = res.meta.hasMore
     // 提取任务类型选项
-    const names = new Set(res.data.map((t) => t.name))
+    const names = new Set(traces.value.map((t) => t.name))
     nameOptions.value = [...names]
   } catch (e: any) {
     message.error('数据加载失败，请重试')
@@ -65,9 +72,8 @@ async function load(page = 1) {
   }
 }
 
-function onTableChange(pag: any) {
-  pagination.current = pag.current
-  load(pag.current)
+function loadMore() {
+  load(false)
 }
 
 function onRowClick(record: SlimTrace) {
@@ -75,7 +81,7 @@ function onRowClick(record: SlimTrace) {
   drawerOpen.value = true
 }
 
-onMounted(() => load(1))
+onMounted(() => load(true))
 </script>
 
 <template>
@@ -87,24 +93,23 @@ onMounted(() => load(1))
         placeholder="任务类型"
         allow-clear
         class="filter-select"
-        @change="load(1)"
+        @change="load(true)"
       >
         <a-select-option v-for="n in nameOptions" :key="n" :value="n">{{ n }}</a-select-option>
       </a-select>
-      <a-range-picker v-model:value="filters.dateRange" @change="load(1)" />
-      <a-button @click="load(pagination.current)">🔄 刷新</a-button>
+      <a-range-picker v-model:value="filters.dateRange" @change="load(true)" />
+      <a-button @click="load(true)">🔄 刷新</a-button>
     </div>
 
     <a-table
       :columns="columns"
       :data-source="traces"
       :loading="loading"
-      :pagination="pagination"
+      :pagination="false"
       :row-key="(r: SlimTrace) => r.id"
       :scroll="{ x: 800 }"
       size="small"
       :custom-row="(record: SlimTrace) => ({ onClick: () => onRowClick(record) })"
-      @change="onTableChange"
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'name'">
@@ -112,6 +117,27 @@ onMounted(() => load(1))
         </template>
       </template>
     </a-table>
+
+    <!-- 加载更多 / 分页底部 -->
+    <div class="list-footer">
+      <div v-if="!traces.length && !loading" class="empty-inline">
+        <div class="empty-inline-icon">📭</div>
+        <div class="empty-inline-text">暂无调用记录</div>
+      </div>
+      <a-button
+        v-if="hasMore && traces.length"
+        type="default"
+        block
+        :loading="loading"
+        class="load-more-btn"
+        @click="loadMore"
+      >
+        加载更多
+      </a-button>
+      <div v-if="!hasMore && traces.length" class="list-end">
+        已加载全部 {{ traces.length }} 条记录
+      </div>
+    </div>
   </a-card>
 
   <TraceDrawer :trace-id="selectedTraceId" v-model:open="drawerOpen" />
@@ -125,9 +151,7 @@ onMounted(() => load(1))
   flex-wrap: wrap;
   align-items: center;
 }
-.filter-select {
-  width: 200px;
-}
+.filter-select { width: 200px; }
 .trace-name {
   color: var(--primary);
   cursor: pointer;
@@ -135,20 +159,40 @@ onMounted(() => load(1))
 }
 .trace-name:hover { text-decoration: underline; }
 :deep(.ant-table-tbody > tr) { cursor: pointer; }
-:deep(.ant-table-tbody > tr:hover > td) { background: #f0f7f8 !important; }
+:deep(.ant-table-tbody > tr:hover > td) { background: var(--primary-bg) !important; }
 
-/* 移动端：筛选栏垂直堆叠、下拉框自适应 */
+/* 列表底部 */
+.list-footer {
+  margin-top: 16px;
+  text-align: center;
+}
+.load-more-btn {
+  max-width: 240px;
+  margin: 0 auto;
+  border-radius: var(--radius-md);
+}
+.list-end {
+  font-size: 13px;
+  color: var(--text-tertiary);
+  padding: 8px 0;
+}
+
+/* 内联空状态 */
+.empty-inline {
+  text-align: center;
+  padding: 48px 0;
+}
+.empty-inline-icon { font-size: 48px; margin-bottom: 12px; }
+.empty-inline-text { color: var(--text-tertiary); font-size: 14px; }
+
+/* 移动端 */
 @media (max-width: 768px) {
   .filter-bar {
     flex-direction: column;
     align-items: stretch;
     gap: 8px;
   }
-  .filter-select {
-    width: 100%;
-  }
-  .filter-bar :deep(.ant-picker) {
-    width: 100%;
-  }
+  .filter-select { width: 100%; }
+  .filter-bar :deep(.ant-picker) { width: 100%; }
 }
 </style>

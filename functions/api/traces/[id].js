@@ -27,7 +27,7 @@ export async function onRequestGet(ctx) {
       const q = {
         traceId,
         limit: 100,
-        fields: 'basic,io,model,usage,metrics',
+        fields: 'basic,io,model,usage,metrics,metadata',
       };
       if (cursor) q.cursor = cursor;
       const batch = await langfuseFetch(env, '/api/public/v2/observations', q);

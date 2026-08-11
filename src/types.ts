@@ -39,12 +39,23 @@ export interface SlimObservation {
 
 /** Trace 详情（含 observations） */
 export interface TraceDetail {
-  trace: SlimTrace
+  trace: {
+    id: string
+    name: string
+    observations: number
+    latency: number
+  }
   observations: SlimObservation[]
 }
 
-/** 列表响应 */
+/** 列表响应（v2 cursor 分页） */
 export interface TraceListResponse {
   data: SlimTrace[]
-  meta: { page: number; limit: number; totalItems: number; totalPages: number }
+  meta: {
+    limit: number
+    nextCursor: string | null
+    hasMore: boolean
+    totalReturned: number
+    totalObsSeen: number
+  }
 }

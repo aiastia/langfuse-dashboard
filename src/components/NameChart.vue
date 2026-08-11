@@ -12,31 +12,68 @@ const props = defineProps<{
   data: [string, number][]
 }>()
 
-const colors = ['#4D8088', '#6BAEB8', '#8FCAD1', '#B5DDE2', '#D4EBEE', '#E8F4F6', '#F0D9B5', '#E0B886', '#CC9860', '#B57A3D']
+const total = computed(() => props.data.reduce((a, d) => a + d[1], 0))
 
 const option = computed(() => ({
-  tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-  grid: { left: 100, right: 30, top: 10, bottom: 20 },
+  tooltip: {
+    trigger: 'axis',
+    axisPointer: { type: 'shadow', shadowStyle: { color: 'rgba(77,128,136,0.06)' } },
+    backgroundColor: 'rgba(26, 29, 33, 0.92)',
+    borderColor: 'transparent',
+    borderRadius: 8,
+    padding: [8, 12],
+    textStyle: { color: '#fff', fontSize: 13 },
+    formatter: (params: any) => {
+      const p = params[0]
+      const pct = total.value > 0 ? ((p.value / total.value) * 100).toFixed(1) : '0'
+      return `<div style="font-weight:600;margin-bottom:2px">${p.name}</div><div style="color:#6BAEB8">${p.value} 次 (${pct}%)</div>`
+    },
+  },
+  grid: { left: 110, right: 30, top: 10, bottom: 24 },
   xAxis: {
     type: 'value',
     minInterval: 1,
-    splitLine: { lineStyle: { color: '#f0f0f0' } },
-    axisLabel: { color: '#8c8c8c', fontSize: 12 },
+    splitLine: { lineStyle: { color: '#F0F1F4', type: 'dashed' } },
+    axisLine: { show: false },
+    axisTick: { show: false },
+    axisLabel: { color: '#8A9099', fontSize: 12 },
   },
   yAxis: {
     type: 'category',
     data: props.data.map((d) => d[0]).reverse(),
-    axisLine: { lineStyle: { color: '#d9d9d9' } },
-    axisLabel: { color: '#595959', fontSize: 12 },
+    axisLine: { lineStyle: { color: '#E8EAED' } },
+    axisTick: { show: false },
+    axisLabel: {
+      color: '#535965',
+      fontSize: 12,
+      fontWeight: 500,
+      width: 100,
+      overflow: 'truncate',
+    },
   },
   series: [
     {
       type: 'bar',
-      data: props.data.map((d) => d[1]).reverse().map((v, i) => ({
-        value: v,
-        itemStyle: { color: colors[i % colors.length], borderRadius: [0, 4, 4, 0] },
-      })),
-      barWidth: '60%',
+      data: props.data.map((d) => d[1]).reverse().map((_, i, arr) => {
+        // 渐变色：排名越靠前颜色越深
+        const idx = arr.length - 1 - i
+        const ratio = idx / Math.max(arr.length - 1, 1)
+        const opacity = 1 - ratio * 0.55
+        return {
+          value: arr[i],
+          itemStyle: {
+            color: {
+              type: 'linear', x: 0, y: 0, x2: 1, y2: 0,
+              colorStops: [
+                { offset: 0, color: `rgba(77,128,136,${opacity * 0.6})` },
+                { offset: 1, color: `rgba(107,174,184,${opacity})` },
+              ],
+            },
+            borderRadius: [0, 6, 6, 0],
+          },
+        }
+      }),
+      barWidth: '55%',
     },
   ],
 }))
