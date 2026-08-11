@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive } from 'vue'
+import { message } from 'ant-design-vue'
 import { useLangfuse } from '../composables/useLangfuse'
 import type { SlimTrace } from '../types'
 import TraceDrawer from '../components/TraceDrawer.vue'
@@ -57,6 +58,7 @@ async function load(page = 1) {
     const names = new Set(res.data.map((t) => t.name))
     nameOptions.value = [...names]
   } catch (e: any) {
+    message.error('数据加载失败，请重试')
     console.error(e)
   } finally {
     loading.value = false
@@ -84,7 +86,7 @@ onMounted(() => load(1))
         v-model:value="filters.name"
         placeholder="任务类型"
         allow-clear
-        style="width: 200px"
+        class="filter-select"
         @change="load(1)"
       >
         <a-select-option v-for="n in nameOptions" :key="n" :value="n">{{ n }}</a-select-option>
@@ -99,6 +101,7 @@ onMounted(() => load(1))
       :loading="loading"
       :pagination="pagination"
       :row-key="(r: SlimTrace) => r.id"
+      :scroll="{ x: 800 }"
       size="small"
       :custom-row="(record: SlimTrace) => ({ onClick: () => onRowClick(record) })"
       @change="onTableChange"
@@ -122,6 +125,9 @@ onMounted(() => load(1))
   flex-wrap: wrap;
   align-items: center;
 }
+.filter-select {
+  width: 200px;
+}
 .trace-name {
   color: var(--primary);
   cursor: pointer;
@@ -130,4 +136,19 @@ onMounted(() => load(1))
 .trace-name:hover { text-decoration: underline; }
 :deep(.ant-table-tbody > tr) { cursor: pointer; }
 :deep(.ant-table-tbody > tr:hover > td) { background: #f0f7f8 !important; }
+
+/* 移动端：筛选栏垂直堆叠、下拉框自适应 */
+@media (max-width: 768px) {
+  .filter-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .filter-select {
+    width: 100%;
+  }
+  .filter-bar :deep(.ant-picker) {
+    width: 100%;
+  }
+}
 </style>

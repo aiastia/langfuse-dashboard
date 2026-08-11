@@ -31,15 +31,47 @@ export async function langfuseFetch(env, path, params) {
   return resp.json();
 }
 
-/** 统一 JSON 响应 + CORS 头 */
-export function json(data, status = 200) {
+/** 统一 JSON 响应 + CORS 头
+ *  extraHeaders 可追加自定义响应头（如 Cache-Control）。
+ */
+export function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Access-Control-Allow-Origin': '*',
+      ...extraHeaders,
     },
   });
+}
+
+/**
+ * 边缘运行时短时内存缓存。
+ * CF Pages Functions 每个 isolate 存活期内复用全局对象，
+ * 命中缓存可避免重复请求上游 Langfuse API，显著缓解冷启动重复调用。
+ *
+ * @param {string} key   缓存键（通常是请求参数序列化后的字符串）
+ * @param {number} ttl   存活时间（毫秒）
+ * @param {() => Promise<any>} fetcher  未命中时的数据获取函数
+ * @returns {Promise<{data: any, cacheHit: boolean}>}
+ */
+export async function cached(key, ttl, fetcher) {
+  // isolate 级全局缓存表（首次调用时初始化）
+  globalThis.__LF_CACHE__ = globalThis.__LF_CACHE__ || new Map();
+  const store = globalThis.__LF_CACHE__;
+  const now = Date.now();
+  const entry = store.get(key);
+  if (entry && entry.expire > now) {
+    return { data: entry.data, cacheHit: true };
+  }
+  const data = await fetcher();
+  store.set(key, { data, expire: now + ttl });
+  // 简易清理：超过 200 条时删除最旧的，防止内存膨胀
+  if (store.size > 200) {
+    const firstKey = store.keys().next().value;
+    store.delete(firstKey);
+  }
+  return { data, cacheHit: false };
 }
 
 /** 统一错误响应 */

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
@@ -10,16 +10,47 @@ const menuItems = [
   { key: '/', label: '📊 统计面板' },
   { key: '/traces', label: '📋 调用记录' },
 ]
+
+// 响应式断点：md = 768px，窄屏用抽屉菜单替代固定侧边栏
+const isMobile = ref(false)
+const drawerOpen = ref(false)
+
+function checkBreakpoint() {
+  isMobile.value = window.innerWidth <= 768
+}
+function onNavigate(key: string) {
+  router.push(key)
+  drawerOpen.value = false // 选择后关闭抽屉
+}
+// 类型安全的菜单点击处理（宽屏）
+function onMenuClick({ key }: { key: string }) {
+  router.push(key)
+}
+// 类型安全的菜单点击处理（窄屏抽屉，选择后关闭）
+function onMenuClickMobile({ key }: { key: string }) {
+  onNavigate(key)
+}
+
+onMounted(() => {
+  checkBreakpoint()
+  window.addEventListener('resize', checkBreakpoint)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', checkBreakpoint)
+})
 </script>
 
 <template>
   <a-layout style="min-height: 100vh">
     <a-layout-header class="app-header">
+      <!-- 窄屏汉堡按钮 -->
+      <span v-if="isMobile" class="hamburger" @click="drawerOpen = true">☰</span>
       <div class="logo">🔍 AI 可观测性看板</div>
     </a-layout-header>
     <a-layout>
-      <a-layout-sider width="200" class="app-sider" breakpoint="md" :collapsed-width="0">
-        <a-menu mode="inline" :selected-keys="[activeKey]" @click="({ key }) => router.push(key)">
+      <!-- 宽屏：固定侧边栏（窄屏隐藏） -->
+      <a-layout-sider v-if="!isMobile" width="200" class="app-sider">
+        <a-menu mode="inline" :selected-keys="[activeKey]" @click="onMenuClick">
           <a-menu-item v-for="item in menuItems" :key="item.key">{{ item.label }}</a-menu-item>
         </a-menu>
       </a-layout-sider>
@@ -27,6 +58,20 @@ const menuItems = [
         <router-view />
       </a-layout-content>
     </a-layout>
+
+    <!-- 窄屏：抽屉式导航菜单 -->
+    <a-drawer
+      v-if="isMobile"
+      :open="drawerOpen"
+      placement="left"
+      title="导航"
+      :width="240"
+      @update:open="drawerOpen = $event"
+    >
+      <a-menu mode="inline" :selected-keys="[activeKey]" @click="onMenuClickMobile">
+        <a-menu-item v-for="item in menuItems" :key="item.key">{{ item.label }}</a-menu-item>
+      </a-menu>
+    </a-drawer>
   </a-layout>
 </template>
 
@@ -47,6 +92,13 @@ body { background: var(--bg); font-family: -apple-system, 'PingFang SC', 'Noto S
   height: 56px;
   line-height: 56px;
 }
+.hamburger {
+  color: #fff;
+  font-size: 20px;
+  margin-right: 12px;
+  cursor: pointer;
+  line-height: 56px;
+}
 .logo {
   color: #fff;
   font-size: 18px;
@@ -62,5 +114,12 @@ body { background: var(--bg); font-family: -apple-system, 'PingFang SC', 'Noto S
   max-width: 1400px;
   margin: 0 auto;
   width: 100%;
+}
+
+/* 移动端：缩小 content padding */
+@media (max-width: 768px) {
+  .app-header { padding: 0 12px; }
+  .logo { font-size: 16px; }
+  .app-content { padding: 12px; }
 }
 </style>

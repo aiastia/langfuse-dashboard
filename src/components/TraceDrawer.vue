@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { useLangfuse } from '../composables/useLangfuse'
 import type { TraceDetail, SlimObservation } from '../types'
 
@@ -10,6 +10,20 @@ const { fetchTraceDetail } = useLangfuse()
 const loading = ref(false)
 const detail = ref<TraceDetail | null>(null)
 const expandedKeys = ref<string[]>([])
+
+// 抽屉宽度自适应：窄屏全屏，宽屏固定 680
+const isMobile = ref(false)
+function checkBreakpoint() {
+  isMobile.value = window.innerWidth <= 768
+}
+onMounted(() => {
+  checkBreakpoint()
+  window.addEventListener('resize', checkBreakpoint)
+})
+onUnmounted(() => {
+  window.removeEventListener('resize', checkBreakpoint)
+})
+const drawerWidth = computed(() => (isMobile.value ? '100%' : 680))
 
 watch(
   () => [props.traceId, props.open],
@@ -56,7 +70,7 @@ function truncContent(data: any, max = 200): string {
   <a-drawer
     :open="open"
     @update:open="emit('update:open', $event)"
-    width="680"
+    :width="drawerWidth"
     :title="detail?.trace?.name || '加载中...'"
     placement="right"
   >
