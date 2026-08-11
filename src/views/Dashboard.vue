@@ -68,19 +68,20 @@ async function load() {
   const from = new Date()
   from.setDate(from.getDate() - 7)
   try {
-    const res = await fetchTraces({ limit: 100, fromTimestamp: from.toISOString() })
+    // 首批 limit=50 快速展示
+    const res = await fetchTraces({ limit: 50, fromTimestamp: from.toISOString() })
     traces.value = res.data
     loading.value = false
 
-    // 后台静默补全剩余页（cursor 翻页，最多 4 次）
+    // 后台静默补全剩余页（cursor 翻页，最多 5 次）
     if (res.meta.hasMore) {
       fetchingMore.value = true
       try {
         let cursor = res.meta.nextCursor
         let pages = 0
-        while (cursor && pages < 4) {
+        while (cursor && pages < 5) {
           const more = await fetchTraces({
-            limit: 100,
+            limit: 50,
             cursor,
             fromTimestamp: from.toISOString(),
           })

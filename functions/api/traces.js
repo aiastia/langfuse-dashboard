@@ -51,29 +51,26 @@ export async function onRequestGet(ctx) {
 /**
  * 从 v2 observations 端点拉取 observation 行，按 traceId 分组重建 trace 列表。
  *
- * 策略：v2 按 startTime 降序返回 observation 行，同一 trace 的行分散在结果中。
- * 用 Map 按 traceId 收集，直到不同 traceId 数量达到 traceLimit 或翻完所有页。
- * 为保证同一 trace 的所有 observation 行都被收集到，
- * 在达到 traceLimit 后再多拉一页（边界 trace 的行可能未完整收集）。
+ * 性能策略：每次 HTTP 请求只拉一页 observation（最多 100 行），
+ * 按 traceId 分组后如果不同的 traceId 数量已够 traceLimit 就返回。
+ * 最多翻 maxPages 页，防止请求时间过长（CF Function 有 CPU 时间限制）。
+ * 前端通过 cursor + 渐进加载 / 重试来补全剩余数据。
  */
 async function fetchTracesFromV2(env, opts) {
   const { traceLimit, cursor, name, userId, fromTimestamp, toTimestamp } = opts;
 
-  // v2 每次请求拉 100 条 observation 行
-  const obsPerRequest = 100;
-  const maxPages = 10; // 最多翻 10 页 = 1000 行，防止无限拉取
+  const obsPerRequest = Math.min(traceLimit * 3, 100); // 每 trace 约 2-3 个 observation
+  const maxPages = 3; // 最多翻 3 页，控制单次请求总耗时
 
   // 按 traceId 分组收集 observation 行
   const traceMap = new Map(); // traceId → observation[]
   let nextCursor = cursor || null;
   let page = 0;
-  let totalObsSeen = 0;
 
   while (page < maxPages) {
     const params = {
       limit: obsPerRequest,
       fields: 'basic,metrics,trace_context,metadata',
-      orderBy: 'startTime-desc',
     };
     if (nextCursor) params.cursor = nextCursor;
     if (name) params.name = name;
@@ -89,37 +86,32 @@ async function fetchTracesFromV2(env, opts) {
       if (!traceMap.has(tid)) traceMap.set(tid, []);
       traceMap.get(tid).push(row);
     }
-    totalObsSeen += rows.length;
 
     nextCursor = batch.meta?.cursor || null;
-
-    // 停止条件：无更多数据，或已收集够 trace 数且至少拉了一页
     page++;
+
+    // 停止条件：无更多数据，或已收集够 trace 数量
     if (!nextCursor || !rows.length) break;
-    if (traceMap.size >= traceLimit && page > 1) break;
+    if (traceMap.size >= traceLimit) break;
   }
 
   // 按 trace 最早 observation 时间降序排列（最近的在前）
-  const traceIds = [...traceMap.keys()];
-  const traces = traceIds
+  const traces = [...traceMap.keys()]
     .map((tid) => slimTraceFromObservations(tid, traceMap.get(tid)))
     .sort((a, b) => {
       const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
       const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
       return tb - ta;
-    });
-
-  // 截取到请求的 trace 数量
-  const pagedTraces = traces.slice(0, traceLimit);
+    })
+    .slice(0, traceLimit);
 
   return {
-    data: pagedTraces,
+    data: traces,
     meta: {
       limit: traceLimit,
       nextCursor: nextCursor || null,
       hasMore: nextCursor != null,
-      totalReturned: pagedTraces.length,
-      totalObsSeen,
+      totalReturned: traces.length,
     },
   };
 }
