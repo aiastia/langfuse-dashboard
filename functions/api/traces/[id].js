@@ -1,4 +1,4 @@
-import { langfuseFetch, json, error, slimObservationV2 } from '../../_langfuse.js';
+import { langfuseFetch, json, error, slimObservationV2, emptyTokenBreakdown } from '../../_langfuse.js';
 
 /** GET /api/traces/:id — trace 详情（含所有 observation 的完整 input/output）
  *
@@ -47,10 +47,23 @@ export async function onRequestGet(ctx) {
 
     // trace 基本信息：从 observations 组装最小摘要
     const firstObs = observations[0] || {};
-    const totalLatency = observations.reduce(
-      (a, o) => Math.max(a, o.latency || 0),
-      0
-    );
+    // trace 耗时 = 最早 startTime → 最晚 endTime 的墙钟时间（嵌套 observation 相互重叠，不能累加）
+    const startTimes = observations
+      .map((o) => (o.startTime ? new Date(o.startTime).getTime() : 0))
+      .filter((t) => t > 0);
+    const endTimes = observations
+      .map((o) => (o.endTime ? new Date(o.endTime).getTime() : 0))
+      .filter((t) => t > 0);
+    const minStart = startTimes.length ? Math.min(...startTimes) : 0;
+    const maxEnd = endTimes.length ? Math.max(...endTimes) : 0;
+    const totalLatency = minStart && maxEnd > minStart ? (maxEnd - minStart) / 1000 : 0;
+
+    // token 6 项汇总
+    const tokens = emptyTokenBreakdown();
+    for (const o of observations) {
+      for (const k of Object.keys(tokens)) tokens[k] += o.usage[k] || 0;
+    }
+
     const traceSummary = {
       id: traceId,
       name:
@@ -59,6 +72,7 @@ export async function onRequestGet(ctx) {
         traceId,
       observations: observations.length,
       latency: totalLatency,
+      usage: tokens,
     };
 
     return json({ trace: traceSummary, observations });

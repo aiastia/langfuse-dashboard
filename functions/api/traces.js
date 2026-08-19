@@ -70,7 +70,7 @@ async function fetchTracesFromV2(env, opts) {
   while (page < maxPages) {
     const params = {
       limit: obsPerRequest,
-      fields: 'basic,metrics,trace_context,metadata',
+      fields: 'basic,metrics,usage,trace_context,metadata',
     };
     if (nextCursor) params.cursor = nextCursor;
     if (name) params.name = name;

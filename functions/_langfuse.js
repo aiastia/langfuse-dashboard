@@ -79,6 +79,60 @@ export async function cached(key, ttl, fetcher) {
 }
 
 /**
+ * 从 v2 observation 行解析 6 项 token 用量拆解。
+ *
+ * Langfuse 约定（model-usage-and-cost 文档）：
+ *  - usageDetails 是开放 map：input 不含缓存、output 不含思考，各桶互斥，
+ *    total = 所有非 total 桶之和。
+ *  - 缓存/思考的键名随接入端而异（SDK camelCase / OpenAI 扁平化 snake_case /
+ *    Anthropic 原生 snake_case），所以按候选键名模糊取值。
+ *  - usageDetails 缺失时退回 usage 组的扁平字段 inputUsage/outputUsage。
+ *
+ * 返回：{ input, cache, totalInput, output, reasoning, totalOutput, total }
+ *   输入(未缓存) / 输入缓存 / 总输入 / 输出(未思考) / 思考 / 总输出 / 总计
+ */
+const CACHE_READ_KEYS = [
+  'inputCacheRead', 'input_cached_tokens', 'inputCachedTokens',
+  'cache_read_input_tokens', 'input_cache_read',
+];
+const CACHE_WRITE_KEYS = [
+  'inputCacheWrite', 'input_cache_write', 'inputCachedWriteTokens',
+  'cache_creation_input_tokens',
+];
+const REASONING_KEYS = [
+  'outputReasoning', 'output_reasoning_tokens', 'outputReasoningTokens',
+  'reasoning_tokens', 'output_reasoning',
+];
+
+export function tokenBreakdown(o) {
+  const ud = o.usageDetails || {};
+  const pick = (keys) => keys.reduce((a, k) => a + (Number(ud[k]) || 0), 0);
+
+  const input = Number(ud.input ?? o.inputUsage) || 0;
+  const output = Number(ud.output ?? o.outputUsage) || 0;
+  const cache = pick(CACHE_READ_KEYS) + pick(CACHE_WRITE_KEYS);
+  const reasoning = pick(REASONING_KEYS);
+
+  return {
+    input,
+    cache,
+    totalInput: input + cache,
+    output,
+    reasoning,
+    totalOutput: output + reasoning,
+    total: input + cache + output + reasoning,
+  };
+}
+
+/** 空的 token 拆解（列表聚合的初始值） */
+export function emptyTokenBreakdown() {
+  return {
+    input: 0, cache: 0, totalInput: 0,
+    output: 0, reasoning: 0, totalOutput: 0, total: 0,
+  };
+}
+
+/**
  * 从一组同 traceId 的 v2 observation 行聚合出一个 SlimTrace。
  * v2 没有 trace 级端点，用 observation 行按 traceId 分组重建。
  *
@@ -87,6 +141,7 @@ export async function cached(key, ttl, fetcher) {
  * @returns {object} SlimTrace
  */
 export function slimTraceFromObservations(traceId, obsList) {
+  const tokens = emptyTokenBreakdown();
   if (!obsList.length) {
     return {
       id: traceId,
@@ -103,16 +158,20 @@ export function slimTraceFromObservations(traceId, obsList) {
       taskTitle: '',
       tags: [],
       environment: 'default',
+      usage: tokens,
     };
   }
 
-  // 按 startTime 找最早/最晚，近似 trace 的时间范围
-  const times = obsList
+  // trace 时长 = 最早 startTime → 最晚 endTime 的墙钟时间
+  const startTimes = obsList
     .map((o) => (o.startTime ? new Date(o.startTime).getTime() : 0))
     .filter((t) => t > 0);
-  const minTime = times.length ? Math.min(...times) : 0;
-  const maxTime = times.length ? Math.max(...times) : 0;
-  const latency = minTime && maxTime ? (maxTime - minTime) / 1000 : 0;
+  const endTimes = obsList
+    .map((o) => (o.endTime ? new Date(o.endTime).getTime() : 0))
+    .filter((t) => t > 0);
+  const minTime = startTimes.length ? Math.min(...startTimes) : 0;
+  const maxTime = endTimes.length ? Math.max(...endTimes) : 0;
+  const latency = minTime && maxTime && maxTime > minTime ? (maxTime - minTime) / 1000 : 0;
 
   // trace name：优先用 trace_context.traceName，否则取第一个 observation 的 name
   const name =
@@ -127,6 +186,12 @@ export function slimTraceFromObservations(traceId, obsList) {
   // tags 从 trace_context 提取
   const tags = obsList.find((o) => o.tags)?.tags || [];
 
+  // token 6 项汇总
+  for (const o of obsList) {
+    const tk = tokenBreakdown(o);
+    for (const k of Object.keys(tokens)) tokens[k] += tk[k] || 0;
+  }
+
   return {
     id: traceId,
     name: name || '未命名',
@@ -134,7 +199,7 @@ export function slimTraceFromObservations(traceId, obsList) {
     userId: obsList.find((o) => o.userId)?.userId || '',
     sessionId: obsList.find((o) => o.sessionId)?.sessionId || '',
     latency,
-    totalCost: obsList.reduce((a, o) => a + (o.calculatedTotalCost || 0), 0),
+    totalCost: obsList.reduce((a, o) => a + (Number(o.calculatedTotalCost ?? o.totalCost) || 0), 0),
     observationCount: obsList.length,
     runner: meta.runner || '',
     projectId: meta.project_id || '',
@@ -142,6 +207,7 @@ export function slimTraceFromObservations(traceId, obsList) {
     taskTitle: meta.task_title || '',
     tags,
     environment: obsList.find((o) => o.environment)?.environment || 'default',
+    usage: tokens,
   };
 }
 
@@ -149,8 +215,10 @@ export function slimTraceFromObservations(traceId, obsList) {
  * 精简 v2 observations 端点的返回行（用于 trace 详情）。
  * v2 字段结构与 v1 不同：
  *  - model → providedModelName
- *  - usage → inputUsage / outputUsage / totalUsage
- *  - latency/cost → 在 metrics group
+ *  - usage → usageDetails（明细 map）+ inputUsage/outputUsage/totalUsage（扁平汇总）
+ *  - latency → metrics 组的 latency（旧名 calculatedLatency 已废弃），
+ *    缺失时用 endTime-startTime 兜底
+ *  - cost → calculatedTotalCost / totalCost（均为 string 或 number）
  *  - input/output → 在 io group，返回为 raw string（需尝试 JSON.parse）
  *  - parentId → parentObservationId
  */
@@ -165,11 +233,11 @@ export function slimObservationV2(o) {
     }
   }
 
-  const usage = {
-    input: o.inputUsage || 0,
-    output: o.outputUsage || 0,
-    total: o.totalUsage || 0,
-  };
+  const startTime = o.startTime ? new Date(o.startTime).getTime() : 0;
+  const endTime = o.endTime ? new Date(o.endTime).getTime() : 0;
+  const latency =
+    Number(o.latency ?? o.calculatedLatency) ||
+    (endTime > startTime ? (endTime - startTime) / 1000 : 0);
 
   return {
     id: o.id,
@@ -178,16 +246,14 @@ export function slimObservationV2(o) {
     model: o.providedModelName || o.internalModelId || '',
     startTime: o.startTime,
     endTime: o.endTime,
-    latency: o.calculatedLatency || 0,
-    cost: o.calculatedTotalCost || 0,
+    latency,
+    cost: Number(o.calculatedTotalCost ?? o.totalCost) || 0,
     level: o.level || 'DEFAULT',
     input: parseIO(o.input),
     output: parseIO(o.output),
     metadata: o.metadata || {},
-    usage,
-    inputTokens: usage.input,
-    outputTokens: usage.output,
-    totalTokens: usage.total,
+    usage: tokenBreakdown(o),
+    usageDetails: o.usageDetails || null,
     parentId: o.parentObservationId || null,
   };
 }

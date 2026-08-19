@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { message } from 'ant-design-vue'
 import { useLangfuse } from '../composables/useLangfuse'
-import type { SlimTrace } from '../types'
+import type { SlimTrace, TokenBreakdown } from '../types'
 import StatCard from '../components/StatCard.vue'
 import TrendChart from '../components/TrendChart.vue'
 import NameChart from '../components/NameChart.vue'
@@ -30,6 +30,34 @@ const avgLatency = computed(() => {
   const sum = todayTraces.value.reduce((a, t) => a + (t.latency || 0), 0)
   return Math.round(sum / todayTraces.value.length * 10) / 10
 })
+
+// Token 6 项汇总（近 7 天已加载的全部 trace）
+const tokenStats = computed<TokenBreakdown>(() =>
+  traces.value.reduce(
+    (acc, t) => {
+      const u = t.usage
+      if (u) {
+        acc.input += u.input || 0
+        acc.cache += u.cache || 0
+        acc.totalInput += u.totalInput || 0
+        acc.output += u.output || 0
+        acc.reasoning += u.reasoning || 0
+        acc.totalOutput += u.totalOutput || 0
+        acc.total += u.total || 0
+      }
+      return acc
+    },
+    { input: 0, cache: 0, totalInput: 0, output: 0, reasoning: 0, totalOutput: 0, total: 0 }
+  )
+)
+const cacheHitRate = computed(() => {
+  const t = tokenStats.value
+  if (!t.totalInput) return null
+  return Math.round((t.cache / t.totalInput) * 1000) / 10
+})
+function fmt(n: number | undefined) {
+  return (n || 0).toLocaleString()
+}
 
 // 按任务类型分组
 const byName = computed(() => {
@@ -133,6 +161,46 @@ onMounted(load)
       <StatCard title="任务类型数" :value="byName.length" suffix="种" icon="🏷️" />
     </div>
 
+    <!-- Token 用量六项明细 -->
+    <a-card style="margin-top: 16px;">
+      <template #title>🔤 Token 用量（近 7 天）</template>
+      <template #extra>
+        <a-tag v-if="cacheHitRate !== null && cacheHitRate > 0" color="green">
+          ⚡ 缓存命中 {{ cacheHitRate }}%
+        </a-tag>
+        <a-tag color="blue">总计 {{ fmt(tokenStats.total) }}</a-tag>
+      </template>
+      <div class="token-grid">
+        <div class="token-cell">
+          <span class="token-label">📥 输入</span>
+          <span class="token-num">{{ fmt(tokenStats.input) }}</span>
+        </div>
+        <div class="token-cell">
+          <span class="token-label">⚡ 输入缓存</span>
+          <span class="token-num token-cache">{{ fmt(tokenStats.cache) }}</span>
+        </div>
+        <div class="token-cell token-sum">
+          <span class="token-label">Σ 总输入</span>
+          <span class="token-num">{{ fmt(tokenStats.totalInput) }}</span>
+        </div>
+        <div class="token-cell">
+          <span class="token-label">📤 输出</span>
+          <span class="token-num">{{ fmt(tokenStats.output) }}</span>
+        </div>
+        <div class="token-cell">
+          <span class="token-label">🧠 思考</span>
+          <span class="token-num token-think">{{ fmt(tokenStats.reasoning) }}</span>
+        </div>
+        <div class="token-cell token-sum">
+          <span class="token-label">Σ 总输出</span>
+          <span class="token-num">{{ fmt(tokenStats.totalOutput) }}</span>
+        </div>
+      </div>
+      <div v-if="fetchingMore" class="token-note">
+        <a-spin size="small" /> 后台仍在加载更多数据，以上为已加载部分的统计…
+      </div>
+    </a-card>
+
     <a-row :gutter="[16, { xs: 12, sm: 16, lg: 16 }]" style="margin-top: 16px;">
       <a-col :xs="24" :lg="14">
         <a-card title="最近 7 天调用量趋势">
@@ -199,6 +267,46 @@ onMounted(load)
   gap: 16px;
 }
 
+/* Token 六项明细网格 */
+.token-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+}
+.token-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border-light);
+}
+.token-cell.token-sum {
+  background: var(--primary-bg);
+  border-color: transparent;
+}
+.token-label {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+.token-num {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+.token-cache { color: var(--success); }
+.token-think { color: #9254DE; }
+.token-note {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* 加载更多提示 */
 .loading-more {
   font-size: 12px;
@@ -222,5 +330,11 @@ onMounted(load)
     grid-template-columns: repeat(2, 1fr);
     gap: 10px;
   }
+  .token-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .token-cell { padding: 10px 12px; }
+  .token-num { font-size: 17px; }
 }
 </style>
