@@ -54,6 +54,7 @@ defineProps<{
   color: var(--text-primary);
   line-height: 1.1;
   letter-spacing: -0.5px;
+  overflow-wrap: anywhere; /* 长数字窄屏下允许断行，避免溢出卡片 */
 }
 .stat-suffix {
   font-size: 14px;

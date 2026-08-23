@@ -133,6 +133,51 @@ export function emptyTokenBreakdown() {
 }
 
 /**
+ * 从 metadata 对象按精确键名取非空字符串值。
+ * 业务字段（project_id/chapter_number/runner/task_title）均为字符串，可能为空串；
+ * metadata 里同时混有 resourceAttributes/scope 等 SDK 注入的非业务键，
+ * 必须按键名精确取，不能假设"第一个带 metadata 的 observation"就是业务数据。
+ */
+function metaStr(meta, key) {
+  if (!meta || typeof meta !== 'object') return '';
+  const v = meta[key];
+  if (v == null) return '';
+  return String(v).trim();
+}
+
+/**
+ * 遍历一组 observation，按精确键名聚合业务字段：
+ * 每个 observation 的 metadata 只要在该键上有非空值就参与（取第一个非空）。
+ * 后端已把业务字段 propagate 到每个 observation，逐行按键聚合最稳。
+ */
+function pickMetaFields(obsList, keys) {
+  const out = {};
+  for (const k of keys) out[k] = '';
+  for (const o of obsList) {
+    const meta = o.metadata;
+    if (!meta || typeof meta !== 'object') continue;
+    for (const k of keys) {
+      if (!out[k]) out[k] = metaStr(meta, k);
+    }
+  }
+  return out;
+}
+
+/**
+ * 从 trace tags 里解析 "prefix:N" 形式的值（如 project:31 / chapter:4）。
+ */
+function tagValue(tags, prefix) {
+  if (!Array.isArray(tags)) return '';
+  for (const t of tags) {
+    if (typeof t === 'string' && t.startsWith(prefix)) {
+      const v = t.slice(prefix.length).trim();
+      if (v) return v;
+    }
+  }
+  return '';
+}
+
+/**
  * 从一组同 traceId 的 v2 observation 行聚合出一个 SlimTrace。
  * v2 没有 trace 级端点，用 observation 行按 traceId 分组重建。
  *
@@ -179,10 +224,6 @@ export function slimTraceFromObservations(traceId, obsList) {
     obsList[0].name ||
     traceId;
 
-  // 从第一个含 metadata 的 observation 提取业务字段
-  const obsWithMeta = obsList.find((o) => o.metadata);
-  const meta = (obsWithMeta && obsWithMeta.metadata) || {};
-
   // tags 从 trace_context 提取
   const tags = obsList.find((o) => o.tags)?.tags || [];
 
@@ -192,19 +233,30 @@ export function slimTraceFromObservations(traceId, obsList) {
     for (const k of Object.keys(tokens)) tokens[k] += tk[k] || 0;
   }
 
+  // 业务字段跨 observation 按键聚合（每个 observation 都有 metadata，
+  // 且混有 resourceAttributes/scope 等非业务键，不能只看第一个）
+  const biz = pickMetaFields(obsList, ['project_id', 'chapter_number', 'runner', 'task_title']);
+  const sessionId = obsList.find((o) => o.sessionId)?.sessionId || '';
+
+  // 取值链：
+  //  projectId    metadata.project_id → tags "project:N" → sessionId（恒等于 project_id，兜底）
+  //  chapterNumber metadata.chapter_number → tags "chapter:N" → 空
+  const projectId = biz.project_id || tagValue(tags, 'project:') || sessionId || '';
+  const chapterNumber = biz.chapter_number || tagValue(tags, 'chapter:') || '';
+
   return {
     id: traceId,
     name: name || '未命名',
     timestamp: minTime ? new Date(minTime).toISOString() : '',
     userId: obsList.find((o) => o.userId)?.userId || '',
-    sessionId: obsList.find((o) => o.sessionId)?.sessionId || '',
+    sessionId,
     latency,
     totalCost: obsList.reduce((a, o) => a + (Number(o.calculatedTotalCost ?? o.totalCost) || 0), 0),
     observationCount: obsList.length,
-    runner: meta.runner || '',
-    projectId: meta.project_id || '',
-    chapterNumber: meta.chapter_number || '',
-    taskTitle: meta.task_title || '',
+    runner: biz.runner || '',
+    projectId,
+    chapterNumber,
+    taskTitle: biz.task_title || '',
     tags,
     environment: obsList.find((o) => o.environment)?.environment || 'default',
     usage: tokens,

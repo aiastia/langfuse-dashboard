@@ -427,6 +427,7 @@ function highlightJson(jsonStr: string): string {
   font-weight: 700;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere; /* 长数字窄屏下允许断行，避免溢出单元格 */
 }
 .token-cache { color: var(--success); }
 .token-think { color: #9254DE; }

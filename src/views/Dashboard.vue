@@ -295,6 +295,7 @@ onMounted(load)
   font-weight: 700;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere; /* 长数字窄屏下允许断行，避免溢出单元格 */
 }
 .token-cache { color: var(--success); }
 .token-think { color: #9254DE; }
@@ -336,5 +337,16 @@ onMounted(load)
   }
   .token-cell { padding: 10px 12px; }
   .token-num { font-size: 17px; }
+}
+
+/* 手机（375px 级）：数字格改 2 列，字号进一步收缩保证完整显示 */
+@media (max-width: 480px) {
+  .token-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+  .token-cell { padding: 8px 10px; }
+  .token-num { font-size: 15px; }
+  .token-label { font-size: 11px; }
 }
 </style>
