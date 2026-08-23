@@ -3,3 +3,5 @@
 LANGFUSE_HOST=https://jp.cloud.langfuse.com
 LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxx
 LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxx
+# 看板访问密码（/api/* 需带 X-Access-Key 请求头，不设置时默认 123456）
+ACCESS_PASSWORD=123456

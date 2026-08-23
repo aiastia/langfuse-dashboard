@@ -7,3 +7,4 @@ pages_build_output_dir = "dist"
 #   LANGFUSE_HOST        = https://jp.cloud.langfuse.com
 #   LANGFUSE_PUBLIC_KEY  = pk-lf-xxxx
 #   LANGFUSE_SECRET_KEY  = sk-lf-xxxx
+#   ACCESS_PASSWORD      = 看板访问密码（不设置时默认 123456，/api/* 需带 X-Access-Key 头）

@@ -1,7 +1,10 @@
 import type { TraceListResponse, TraceDetail } from '../types'
+import { getAccessKey, clearAccess } from './useAccess'
 
 /**
  * 带超时与自动重试的请求封装。
+ * - 访问密码：自动携带 X-Access-Key 请求头（值来自 localStorage）
+ * - 401：密码失效，清掉本地密码回到密码页（useAccess 广播）
  * - 超时：20 秒（CF Function 冷启动 + Langfuse API 往返）
  * - 重试：5xx 错误自动重试最多 2 次，递增等待（1s → 2s），
  *   专门应对 CF Pages Function 冷启动首次请求 502 的问题。
@@ -12,8 +15,18 @@ async function api<T>(path: string, retries = 2): Promise<T> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 20000)
     try {
-      const resp = await fetch(path, { signal: controller.signal })
+      const resp = await fetch(path, {
+        signal: controller.signal,
+        headers: { 'X-Access-Key': getAccessKey() },
+      })
       clearTimeout(timer)
+      if (resp.status === 401) {
+        // 密码不对/已失效：清本地密码，全局回到密码页（不重试）
+        clearAccess()
+        const err = new Error('密码不对，请重新输入')
+        ;(err as any).noRetry = true
+        throw err
+      }
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}))
         const err = new Error(body.error || `HTTP ${resp.status}`)
@@ -27,7 +40,7 @@ async function api<T>(path: string, retries = 2): Promise<T> {
       return resp.json()
     } catch (e: any) {
       clearTimeout(timer)
-      if (attempt === retries) throw e
+      if (e?.noRetry || attempt === retries) throw e
       lastErr = e
       await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)))
     }

@@ -1,10 +1,15 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useAccess } from './composables/useAccess'
+import PasswordGate from './components/PasswordGate.vue'
 
 const route = useRoute()
 const router = useRouter()
 const activeKey = computed(() => route.path)
+
+// 访问密码门：未通过（无本地密码或密码失效 401）时只渲染密码页
+const { authorized } = useAccess()
 
 const menuItems = [
   { key: '/', label: '统计面板', icon: '📊' },
@@ -39,7 +44,10 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <a-layout style="min-height: 100vh">
+  <!-- 密码门：未授权时整站只渲染密码页 -->
+  <PasswordGate v-if="!authorized" />
+
+  <a-layout v-else style="min-height: 100vh">
     <a-layout-header class="app-header">
       <!-- 窄屏汉堡按钮 -->
       <span v-if="isMobile" class="hamburger" @click="drawerOpen = true">
