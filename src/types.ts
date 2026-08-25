@@ -39,9 +39,11 @@ export interface SlimObservation {
   latency: number // 秒
   cost: number
   level: string // DEFAULT / DEBUG / WARNING / ERROR
+  statusMessage: string // level=ERROR 时的错误信息
   input: any
   output: any
   metadata: Record<string, any>
+  reasoningContent: string // 思考过程正文（业务端记录在 metadata.reasoning_content，后端提取）
   usage: TokenBreakdown
   usageDetails: Record<string, number> | null // 原始 usage 明细（调试用）
   parentId: string | null

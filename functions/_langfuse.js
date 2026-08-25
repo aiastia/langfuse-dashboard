@@ -291,6 +291,13 @@ export function slimObservationV2(o) {
     Number(o.latency ?? o.calculatedLatency) ||
     (endTime > startTime ? (endTime - startTime) / 1000 : 0);
 
+  // 思考内容：业务端记录在 metadata.reasoning_content（v2 API 无独立 reasoning 字段），
+  // 提为顶层字段并从 metadata 中移除，前端单独成块展示
+  const meta = o.metadata && typeof o.metadata === 'object' ? { ...o.metadata } : {};
+  const reasoningContent =
+    typeof meta.reasoning_content === 'string' ? meta.reasoning_content : '';
+  delete meta.reasoning_content;
+
   return {
     id: o.id,
     type: o.type,
@@ -301,9 +308,11 @@ export function slimObservationV2(o) {
     latency,
     cost: Number(o.calculatedTotalCost ?? o.totalCost) || 0,
     level: o.level || 'DEFAULT',
+    statusMessage: o.statusMessage || '',
     input: parseIO(o.input),
     output: parseIO(o.output),
-    metadata: o.metadata || {},
+    metadata: meta,
+    reasoningContent,
     usage: tokenBreakdown(o),
     usageDetails: o.usageDetails || null,
     parentId: o.parentObservationId || null,

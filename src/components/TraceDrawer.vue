@@ -115,11 +115,82 @@ async function copyContent(data: any) {
 function typeColor(type: string) {
   return { TRACE: 'blue', SPAN: 'cyan', GENERATION: 'green' }[type] || 'default'
 }
-function typeIcon(type: string) {
-  return { TRACE: '🎯', SPAN: '📍', GENERATION: '🤖' }[type] || '•'
+// 节点图标：业务端的思考节点（reasoning: 前缀）和工具节点（🔧 前缀）用专属图标
+function typeIcon(obs: { type: string; name: string }) {
+  if (obs.name?.startsWith('reasoning')) return '🧠'
+  if (obs.name?.startsWith('🔧')) return '🔧'
+  return { TRACE: '🎯', SPAN: '📍', GENERATION: '🤖' }[obs.type] || '•'
 }
 function typeBorderColor(type: string) {
   return { TRACE: '#1890FF', SPAN: '#13C2C2', GENERATION: '#52C41A', EVENT: '#BFBFBF' }[type] || '#BFBFBF'
+}
+// 展示名：剥掉 reasoning:/🔧 前缀（图标已表达节点性质）
+function displayName(obs: { name: string }) {
+  let n = obs.name || ''
+  if (n.startsWith('reasoning')) n = n.replace(/^reasoning:\s*/, '')
+  if (n.startsWith('🔧')) n = n.replace(/^🔧\s*/, '')
+  return n || '(无名)'
+}
+
+/** metadata 展示过滤：剔除 SDK 注入的 scope.*/resourceAttributes.* 噪音键 */
+const META_NOISE_PREFIXES = ['scope.', 'resourceAttributes.']
+function displayMetadata(obs: any): Record<string, any> {
+  const out: Record<string, any> = {}
+  for (const [k, v] of Object.entries(obs.metadata || {})) {
+    if (META_NOISE_PREFIXES.some((p) => k.startsWith(p))) continue
+    if (k === 'reasoning_content') continue // 后端已提为 reasoningContent，兼容旧响应
+    out[k] = v
+  }
+  return out
+}
+
+/** 节点是否有可展开的详情（思考/轮次节点没有 input/output，靠 metadata/reasoning 撑起） */
+function hasDetail(obs: any): boolean {
+  return (
+    obs.type === 'GENERATION' ||
+    !!obs.input ||
+    !!obs.output ||
+    !!obs.reasoningContent ||
+    Object.keys(displayMetadata(obs)).length > 0 ||
+    (obs.level === 'ERROR' && !!obs.statusMessage)
+  )
+}
+
+/** 从 GENERATION 的 output 解析工具调用（业务端把 tool_calls 记在 output JSON 里） */
+interface ToolCall {
+  name: string
+  args: string
+}
+function toolCallsOf(obs: any): ToolCall[] {
+  const out = obs.output
+  if (!out || typeof out !== 'object' || Array.isArray(out)) return []
+  const calls = out.tool_calls
+  if (!Array.isArray(calls) || !calls.length) return []
+  return calls.map((c: any) => {
+    const name = c?.function?.name || c?.name || '未知工具'
+    const raw = c?.function?.arguments ?? c?.arguments ?? c?.input
+    let args = ''
+    if (typeof raw === 'string') {
+      try {
+        args = JSON.stringify(JSON.parse(raw), null, 2)
+      } catch {
+        args = raw
+      }
+    } else if (raw != null) {
+      args = JSON.stringify(raw, null, 2)
+    }
+    return { name, args }
+  })
+}
+
+/** 是否展示原始 Output 块：纯 tool_calls 信封（无 content）时用专门块代替，避免重复 */
+function hasPlainOutput(obs: any): boolean {
+  const out = obs.output
+  if (!out) return false
+  if (typeof out === 'object' && !Array.isArray(out) && Array.isArray(out.tool_calls) && !out.content) {
+    return false
+  }
+  return true
 }
 function formatContent(data: any): string {
   if (!data) return ''
@@ -245,10 +316,11 @@ function highlightJson(jsonStr: string): string {
             >
               <!-- 节点头部 -->
               <div class="obs-node-header" @click="toggleObs(obs.id)">
-                <span class="obs-icon">{{ typeIcon(obs.type) }}</span>
-                <span class="obs-name">{{ obs.name || '(无名)' }}</span>
+                <span class="obs-icon">{{ typeIcon(obs) }}</span>
+                <span class="obs-name">{{ displayName(obs) }}</span>
                 <a-tag :color="typeColor(obs.type)" class="obs-type-tag">{{ obs.type }}</a-tag>
                 <a-tag v-if="obs.model" class="obs-model-tag">{{ obs.model }}</a-tag>
+                <a-tag v-if="toolCallsOf(obs).length" class="obs-tool-tag">🔧×{{ toolCallsOf(obs).length }}</a-tag>
                 <a-tag v-if="obs.level === 'ERROR'" color="red" class="obs-error-tag">错误</a-tag>
                 <span class="expand-arrow" :class="{ 'expanded': expandedKeys.includes(obs.id) }">▸</span>
                 <span class="obs-metrics">
@@ -262,7 +334,9 @@ function highlightJson(jsonStr: string): string {
 
               <!-- 节点详情 -->
               <transition name="expand">
-                <div v-if="expandedKeys.includes(obs.id) && (obs.type === 'GENERATION' || obs.input || obs.output)" class="obs-detail">
+                <div v-if="expandedKeys.includes(obs.id) && hasDetail(obs)" class="obs-detail">
+                  <!-- 错误信息 -->
+                  <div v-if="obs.level === 'ERROR' && obs.statusMessage" class="error-block">⚠ {{ obs.statusMessage }}</div>
                   <!-- 节点级 token 明细 -->
                   <div v-if="obs.usage.total" class="obs-token-detail">
                     <div class="otd-item">
@@ -290,6 +364,27 @@ function highlightJson(jsonStr: string): string {
                       <span class="otd-label">总输出</span>
                     </div>
                   </div>
+                  <!-- 思考过程（业务端记录在 metadata.reasoning_content，后端提取） -->
+                  <div v-if="obs.reasoningContent" class="io-block">
+                    <div class="io-label-row">
+                      <span class="io-label io-label-think">🧠 思考过程</span>
+                      <a-button size="small" type="text" class="io-copy" @click.stop="copyContent(obs.reasoningContent)">复制</a-button>
+                    </div>
+                    <pre class="io-content io-reasoning">{{ obs.reasoningContent }}</pre>
+                  </div>
+                  <!-- 工具调用（从 output.tool_calls 解析） -->
+                  <div v-if="toolCallsOf(obs).length" class="io-block">
+                    <div class="io-label-row">
+                      <span class="io-label io-label-tool">🔧 工具调用（{{ toolCallsOf(obs).length }}）</span>
+                      <a-button size="small" type="text" class="io-copy" @click.stop="copyContent(toolCallsOf(obs))">复制</a-button>
+                    </div>
+                    <div class="tool-call-list">
+                      <div v-for="(tc, i) in toolCallsOf(obs)" :key="i" class="tool-call-item">
+                        <div class="tool-call-name">{{ i + 1 }}. {{ tc.name }}</div>
+                        <pre v-if="tc.args && tc.args !== '{}'" class="io-content tool-call-args">{{ tc.args }}</pre>
+                      </div>
+                    </div>
+                  </div>
                   <div v-if="obs.input" class="io-block">
                     <div class="io-label-row">
                       <span class="io-label">📥 Input</span>
@@ -297,19 +392,19 @@ function highlightJson(jsonStr: string): string {
                     </div>
                     <pre class="io-content" v-html="highlightJson(formatContent(obs.input))"></pre>
                   </div>
-                  <div v-if="obs.output" class="io-block">
+                  <div v-if="hasPlainOutput(obs)" class="io-block">
                     <div class="io-label-row">
                       <span class="io-label">📤 Output</span>
                       <a-button size="small" type="text" class="io-copy" @click.stop="copyContent(obs.output)">复制</a-button>
                     </div>
                     <pre class="io-content" v-html="highlightJson(formatContent(obs.output))"></pre>
                   </div>
-                  <div v-if="obs.metadata && Object.keys(obs.metadata).length" class="io-block">
+                  <div v-if="Object.keys(displayMetadata(obs)).length" class="io-block">
                     <div class="io-label-row">
                       <span class="io-label">📋 Metadata</span>
-                      <a-button size="small" type="text" class="io-copy" @click.stop="copyContent(obs.metadata)">复制</a-button>
+                      <a-button size="small" type="text" class="io-copy" @click.stop="copyContent(displayMetadata(obs))">复制</a-button>
                     </div>
-                    <pre class="io-content io-meta" v-html="highlightJson(formatContent(obs.metadata))"></pre>
+                    <pre class="io-content io-meta" v-html="highlightJson(formatContent(displayMetadata(obs)))"></pre>
                   </div>
                 </div>
               </transition>
@@ -585,6 +680,68 @@ function highlightJson(jsonStr: string): string {
   margin: 0;
 }
 .io-meta { max-height: 150px; }
+
+/* 头部工具调用徽标 */
+.obs-tool-tag {
+  margin: 0; font-size: 11px;
+  background: #E6F4FF !important;
+  border-color: #91CAFF !important;
+  color: #0958A8 !important;
+}
+
+/* 思考/工具区块标签配色（对应紫/蓝主题） */
+.io-label-think { color: #9254DE; }
+.io-label-tool { color: #0958A8; }
+
+/* 思考过程正文：紫底浅色块，纯文本展示 */
+.io-reasoning {
+  background: #F9F0FF;
+  border-color: #E8D5F8;
+  color: #4A3080;
+  max-height: 640px;
+}
+
+/* 工具调用列表 */
+.tool-call-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.tool-call-item {
+  background: #F0F7FF;
+  border: 1px solid #D6E9FF;
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+}
+.tool-call-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: #0958A8;
+  font-family: 'JetBrains Mono', ui-monospace, 'Menlo', 'Consolas', monospace;
+  margin-bottom: 4px;
+}
+.tool-call-args {
+  padding: 8px 10px;
+  font-size: 12px;
+  max-height: 200px;
+  background: #F6F8FA;
+  margin: 0;
+}
+
+/* 错误信息块 */
+.error-block {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: #FFF1F0;
+  border: 1px solid #FFA39E;
+  border-radius: var(--radius-sm);
+  color: #CF1322;
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* JSON 语法高亮 —— 浅色主题高对比配色 */
 :deep(.json-key) { color: #6F42C1; font-weight: 600; }
