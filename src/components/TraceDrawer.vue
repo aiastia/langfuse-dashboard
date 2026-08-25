@@ -132,7 +132,7 @@ function displayName(obs: { name: string }) {
   return n || '(无名)'
 }
 
-/** metadata 展示过滤：剔除 SDK 注入的 scope.*/resourceAttributes.* 噪音键 */
+/** metadata 展示过滤：剔除 SDK 注入的 scope. 与 resourceAttributes. 前缀噪音键 */
 const META_NOISE_PREFIXES = ['scope.', 'resourceAttributes.']
 function displayMetadata(obs: any): Record<string, any> {
   const out: Record<string, any> = {}
