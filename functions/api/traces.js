@@ -10,6 +10,8 @@ import {
  *
  *  Langfuse 废弃了 /api/public/traces，且未提供 /api/public/v2/traces 替代。
  *  官方要求改用 /api/public/v2/observations 按 traceId 分组重建 trace 数据。
+ *  （2026-08-28 对照官方 OpenAPI 规范复核：v4 官方指定替代端点正是
+ *  v2/observations，本文件已是 v4 兼容写法；v1 端点 Cloud 于 2026-11-16 移除。）
  *
  *  查询参数（前端 → v2 observations 参数映射）:
  *   - limit (每页 trace 数，默认 50)
