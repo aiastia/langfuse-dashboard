@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { message } from 'ant-design-vue'
 import { useLangfuse } from '../composables/useLangfuse'
 import type { SlimTrace, TokenBreakdown } from '../types'
@@ -12,6 +12,8 @@ const loading = ref(true)
 const fetchingMore = ref(false)
 const loadError = ref('')
 const traces = ref<SlimTrace[]>([])
+// 统计时间范围（天）：Token 用量、总调用、趋势图都跟随此范围
+const rangeDays = ref(7)
 
 // 今日范围
 const todayStart = computed(() => {
@@ -66,10 +68,10 @@ const byName = computed(() => {
   return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 10)
 })
 
-// 最近 7 天趋势
+// 最近 N 天趋势（N = rangeDays）
 const trend = computed(() => {
   const days: { date: string; label: string; count: number }[] = []
-  for (let i = 6; i >= 0; i--) {
+  for (let i = rangeDays.value - 1; i >= 0; i--) {
     const d = new Date()
     d.setDate(d.getDate() - i)
     d.setHours(0, 0, 0, 0)
@@ -89,15 +91,20 @@ const trend = computed(() => {
 
 /**
  * 渐进加载：先拉首批并立即渲染，再后台静默翻页（cursor 分页）。
+ * loadSeq 防竞态：切换时间范围时旧的后台翻页不能再往新数据里追加。
  */
+let loadSeq = 0
 async function load() {
+  const seq = ++loadSeq
   loading.value = true
   loadError.value = ''
   const from = new Date()
-  from.setDate(from.getDate() - 7)
+  from.setDate(from.getDate() - rangeDays.value)
+  const rangeParams = { fromTimestamp: from.toISOString() }
   try {
     // 首批 limit=50 快速展示
-    const res = await fetchTraces({ limit: 50, fromTimestamp: from.toISOString() })
+    const res = await fetchTraces({ limit: 50, ...rangeParams })
+    if (seq !== loadSeq) return
     traces.value = res.data
     loading.value = false
 
@@ -108,11 +115,8 @@ async function load() {
         let cursor = res.meta.nextCursor
         let pages = 0
         while (cursor && pages < 5) {
-          const more = await fetchTraces({
-            limit: 50,
-            cursor,
-            fromTimestamp: from.toISOString(),
-          })
+          const more = await fetchTraces({ limit: 50, cursor, ...rangeParams })
+          if (seq !== loadSeq) return
           traces.value.push(...more.data)
           cursor = more.meta.nextCursor
           pages++
@@ -121,10 +125,11 @@ async function load() {
       } catch (e) {
         console.error('后台翻页失败:', e)
       } finally {
-        fetchingMore.value = false
+        if (seq === loadSeq) fetchingMore.value = false
       }
     }
   } catch (e: any) {
+    if (seq !== loadSeq) return
     loading.value = false
     loadError.value = e.message || '加载失败'
     message.error('数据加载失败，请重试')
@@ -133,6 +138,7 @@ async function load() {
 }
 
 onMounted(load)
+watch(rangeDays, load)
 </script>
 
 <template>
@@ -156,15 +162,19 @@ onMounted(load)
   <div v-else class="dashboard">
     <div class="stat-cards">
       <StatCard title="今日调用次数" :value="todayCount" suffix="次" icon="📡" />
-      <StatCard title="最近7天总调用" :value="traces.length" suffix="次" icon="📈" />
+      <StatCard :title="`最近${rangeDays}天总调用`" :value="traces.length" suffix="次" icon="📈" />
       <StatCard title="平均耗时(今日)" :value="avgLatency" suffix="秒" icon="⏱️" />
       <StatCard title="任务类型数" :value="byName.length" suffix="种" icon="🏷️" />
     </div>
 
     <!-- Token 用量六项明细 -->
     <a-card style="margin-top: 16px;">
-      <template #title>🔤 Token 用量（近 7 天）</template>
+      <template #title>🔤 Token 用量（近 {{ rangeDays }} 天）</template>
       <template #extra>
+        <a-radio-group v-model:value="rangeDays" size="small" button-style="solid" class="range-switch">
+          <a-radio-button :value="7">7天</a-radio-button>
+          <a-radio-button :value="30">30天</a-radio-button>
+        </a-radio-group>
         <a-tag v-if="cacheHitRate !== null && cacheHitRate > 0" color="green">
           ⚡ 缓存命中 {{ cacheHitRate }}%
         </a-tag>
@@ -203,7 +213,7 @@ onMounted(load)
 
     <a-row :gutter="[16, { xs: 12, sm: 16, lg: 16 }]" style="margin-top: 16px;">
       <a-col :xs="24" :lg="14">
-        <a-card title="最近 7 天调用量趋势">
+        <a-card :title="`最近 ${rangeDays} 天调用量趋势`">
           <TrendChart :data="trend" />
         </a-card>
       </a-col>
@@ -265,6 +275,11 @@ onMounted(load)
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 16px;
+}
+
+/* 范围切换按钮（卡片 extra 内，与右侧 tag 留间距） */
+.range-switch {
+  margin-right: 10px;
 }
 
 /* Token 六项明细网格 */
