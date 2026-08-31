@@ -84,16 +84,24 @@ export async function cached(key, ttl, fetcher) {
  * Langfuse 约定（model-usage-and-cost 文档）：
  *  - usageDetails 是开放 map：input 不含缓存、output 不含思考，各桶互斥，
  *    total = 所有非 total 桶之和。
- *  - 缓存/思考的键名随接入端而异（SDK camelCase / OpenAI 扁平化 snake_case /
- *    Anthropic 原生 snake_case），所以按候选键名模糊取值。
+ *  - 键名随接入端而异，按候选键名模糊取值：
+ *    · Langfuse 归一化键：input / output / input_cached_tokens …（Langfuse SDK 探针）
+ *    · OpenAI 原始键：prompt_tokens / completion_tokens / total_tokens …
+ *      （book 后端走 OpenLLMetry OTel 自动探针，2026-08-31 实测上游存的就是这套）。
+ *      Langfuse 不识别这些键，扁平字段 inputUsage/outputUsage 会被算成 0，
+ *      totalUsage 只跟随 usageDetails.total——所以必须从 usageDetails 原样解析。
+ *  - OpenAI SDK 原生嵌套明细 prompt_tokens_details.cached_tokens /
+ *    completion_tokens_details.reasoning_tokens 也一并读取。
  *  - usageDetails 缺失时退回 usage 组的扁平字段 inputUsage/outputUsage。
  *
  * 返回：{ input, cache, totalInput, output, reasoning, totalOutput, total }
  *   输入(未缓存) / 输入缓存 / 总输入 / 输出(未思考) / 思考 / 总输出 / 总计
  */
+const INPUT_KEYS = ['input', 'input_tokens', 'prompt_tokens', 'inputTokens', 'promptTokens'];
+const OUTPUT_KEYS = ['output', 'output_tokens', 'completion_tokens', 'outputTokens', 'completionTokens'];
 const CACHE_READ_KEYS = [
   'inputCacheRead', 'input_cached_tokens', 'inputCachedTokens',
-  'cache_read_input_tokens', 'input_cache_read',
+  'cache_read_input_tokens', 'input_cache_read', 'cached_tokens',
 ];
 const CACHE_WRITE_KEYS = [
   'inputCacheWrite', 'input_cache_write', 'inputCachedWriteTokens',
@@ -108,10 +116,26 @@ export function tokenBreakdown(o) {
   const ud = o.usageDetails || {};
   const pick = (keys) => keys.reduce((a, k) => a + (Number(ud[k]) || 0), 0);
 
-  const input = Number(ud.input ?? o.inputUsage) || 0;
-  const output = Number(ud.output ?? o.outputUsage) || 0;
-  const cache = pick(CACHE_READ_KEYS) + pick(CACHE_WRITE_KEYS);
-  const reasoning = pick(REASONING_KEYS);
+  // input/output 的候选键互为别名，同一份 usageDetails 只会出现其中一套，
+  // 取第一个非零值，避免别名并存时重复累加
+  const firstNonZero = (keys) => {
+    for (const k of keys) {
+      const v = Number(ud[k]) || 0;
+      if (v) return v;
+    }
+    return 0;
+  };
+  // OpenAI SDK 原生嵌套明细（缓存/思考不摊进顶层 prompt_tokens/completion_tokens）
+  const promptDetails = ud.prompt_tokens_details || ud.input_tokens_details || {};
+  const completionDetails = ud.completion_tokens_details || ud.output_tokens_details || {};
+
+  const input = firstNonZero(INPUT_KEYS) || Number(o.inputUsage) || 0;
+  const output = firstNonZero(OUTPUT_KEYS) || Number(o.outputUsage) || 0;
+  const cache =
+    pick(CACHE_READ_KEYS) +
+    pick(CACHE_WRITE_KEYS) +
+    (Number(promptDetails.cached_tokens) || 0);
+  const reasoning = pick(REASONING_KEYS) + (Number(completionDetails.reasoning_tokens) || 0);
 
   return {
     input,
@@ -302,7 +326,8 @@ export function slimObservationV2(o) {
     id: o.id,
     type: o.type,
     name: o.name || '',
-    model: o.providedModelName || o.internalModelId || '',
+    // v2 返回的模型名字段：探针上报在 providedModelName，服务端解析在 model
+    model: o.providedModelName || o.model || o.internalModelId || '',
     startTime: o.startTime,
     endTime: o.endTime,
     latency,
