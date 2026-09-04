@@ -1,19 +1,20 @@
-import type { TraceListResponse, TraceDetail } from '../types'
+import type { TraceListResponse, TraceDetail, StatsResponse } from '../types'
 import { getAccessKey, clearAccess } from './useAccess'
 
 /**
  * 带超时与自动重试的请求封装。
  * - 访问密码：自动携带 X-Access-Key 请求头（值来自 localStorage）
  * - 401：密码失效，清掉本地密码回到密码页（useAccess 广播）
- * - 超时：20 秒（CF Function 冷启动 + Langfuse API 往返）
+ * - 超时：默认 20 秒（CF Function 冷启动 + Langfuse API 往返），
+ *   个别慢接口（如 30 天统计冷启动要串几十个上游查询）可单独放宽
  * - 重试：5xx 错误自动重试最多 2 次，递增等待（1s → 2s），
  *   专门应对 CF Pages Function 冷启动首次请求 502 的问题。
  */
-async function api<T>(path: string, retries = 2): Promise<T> {
+async function api<T>(path: string, retries = 2, timeoutMs = 20000): Promise<T> {
   let lastErr: unknown
   for (let attempt = 0; attempt <= retries; attempt++) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 20000)
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
       const resp = await fetch(path, {
         signal: controller.signal,
@@ -72,5 +73,15 @@ export function useLangfuse() {
     return api<TraceDetail>(`/api/traces/${id}`)
   }
 
-  return { fetchTraces, fetchTraceDetail }
+  /** 拉取看板统计（服务端聚合，tz 用于按本地时区切天）。
+   *  30 天冷启动要在上游串几十个查询，超时放宽到 60 秒 */
+  async function fetchStats(days: number): Promise<StatsResponse> {
+    return api<StatsResponse>(
+      `/api/stats?days=${days}&tz=${new Date().getTimezoneOffset()}`,
+      2,
+      60000
+    )
+  }
+
+  return { fetchTraces, fetchTraceDetail, fetchStats }
 }

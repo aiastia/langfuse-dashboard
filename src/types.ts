@@ -61,6 +61,20 @@ export interface TraceDetail {
   observations: SlimObservation[]
 }
 
+/** GET /api/stats 返回（服务端用官方 v2 Metrics API 聚合的精确值） */
+export interface StatsResponse {
+  days: number
+  from: string
+  to: string
+  todayCalls: number
+  totalCalls: number
+  avgLatencySec: number
+  tokens: TokenBreakdown
+  cacheHitRate: number | null
+  trend: { date: string; label: string; count: number }[]
+  byName: [string, number][]
+}
+
 /** 列表响应（v2 cursor 分页） */
 export interface TraceListResponse {
   data: SlimTrace[]

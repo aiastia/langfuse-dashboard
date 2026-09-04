@@ -1,149 +1,52 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { message } from 'ant-design-vue'
 import { useLangfuse } from '../composables/useLangfuse'
-import type { SlimTrace, TokenBreakdown } from '../types'
+import type { StatsResponse } from '../types'
 import StatCard from '../components/StatCard.vue'
 import TrendChart from '../components/TrendChart.vue'
 import NameChart from '../components/NameChart.vue'
 
-const { fetchTraces } = useLangfuse()
-const loading = ref(true)
-const fetchingMore = ref(false)
-const loadError = ref('')
-const traces = ref<SlimTrace[]>([])
-// 统计时间范围（天）：Token 用量、总调用、趋势图都跟随此范围
+const { fetchStats } = useLangfuse()
+// 统计时间范围（天）：所有卡片、Token、趋势图跟随此范围
 const rangeDays = ref(7)
+const stats = ref<StatsResponse | null>(null)
+const firstLoading = ref(true) // 首次进入显示骨架屏
+const rangeLoading = ref(false) // 切换范围时保留旧数据 + 转圈提示
+const loadError = ref('')
 
-// 今日范围
-const todayStart = computed(() => {
-  const d = new Date()
-  d.setHours(0, 0, 0, 0)
-  return d.toISOString()
-})
+async function load() {
+  if (!stats.value) firstLoading.value = true
+  else rangeLoading.value = true
+  loadError.value = ''
+  try {
+    stats.value = await fetchStats(rangeDays.value)
+  } catch (e: any) {
+    loadError.value = e.message || '加载失败'
+    message.error('统计数据加载失败，请重试')
+    console.error(e)
+  } finally {
+    firstLoading.value = false
+    rangeLoading.value = false
+  }
+}
 
-// 统计卡片
-const todayTraces = computed(() =>
-  traces.value.filter((t) => t.timestamp >= todayStart.value)
-)
-const todayCount = computed(() => todayTraces.value.length)
-const avgLatency = computed(() => {
-  if (!todayTraces.value.length) return 0
-  const sum = todayTraces.value.reduce((a, t) => a + (t.latency || 0), 0)
-  return Math.round(sum / todayTraces.value.length * 10) / 10
-})
+// Token 6 项（服务端聚合）
+const tokenStats = computed(() => stats.value?.tokens)
+const cacheHitRate = computed(() => stats.value?.cacheHitRate ?? null)
+// 图表只展示前 10 类，明细表格展示全部
+const topNames = computed(() => (stats.value?.byName || []).slice(0, 10))
 
-// Token 6 项汇总（近 7 天已加载的全部 trace）
-const tokenStats = computed<TokenBreakdown>(() =>
-  traces.value.reduce(
-    (acc, t) => {
-      const u = t.usage
-      if (u) {
-        acc.input += u.input || 0
-        acc.cache += u.cache || 0
-        acc.totalInput += u.totalInput || 0
-        acc.output += u.output || 0
-        acc.reasoning += u.reasoning || 0
-        acc.totalOutput += u.totalOutput || 0
-        acc.total += u.total || 0
-      }
-      return acc
-    },
-    { input: 0, cache: 0, totalInput: 0, output: 0, reasoning: 0, totalOutput: 0, total: 0 }
-  )
-)
-const cacheHitRate = computed(() => {
-  const t = tokenStats.value
-  if (!t.totalInput) return null
-  return Math.round((t.cache / t.totalInput) * 1000) / 10
-})
 function fmt(n: number | undefined) {
   return (n || 0).toLocaleString()
 }
 
-// 按任务类型分组
-const byName = computed(() => {
-  const m: Record<string, number> = {}
-  for (const t of traces.value) m[t.name] = (m[t.name] || 0) + 1
-  return Object.entries(m).sort((a, b) => b[1] - a[1]).slice(0, 10)
-})
-
-// 最近 N 天趋势（N = rangeDays）
-const trend = computed(() => {
-  const days: { date: string; label: string; count: number }[] = []
-  for (let i = rangeDays.value - 1; i >= 0; i--) {
-    const d = new Date()
-    d.setDate(d.getDate() - i)
-    d.setHours(0, 0, 0, 0)
-    const next = new Date(d)
-    next.setDate(next.getDate() + 1)
-    const count = traces.value.filter(
-      (t) => t.timestamp >= d.toISOString() && t.timestamp < next.toISOString()
-    ).length
-    days.push({
-      date: d.toISOString(),
-      label: `${d.getMonth() + 1}/${d.getDate()}`,
-      count,
-    })
-  }
-  return days
-})
-
-/**
- * 渐进加载：先拉首批并立即渲染，再后台静默翻页（cursor 分页）。
- * loadSeq 防竞态：切换时间范围时旧的后台翻页不能再往新数据里追加。
- */
-let loadSeq = 0
-async function load() {
-  const seq = ++loadSeq
-  loading.value = true
-  loadError.value = ''
-  const from = new Date()
-  from.setDate(from.getDate() - rangeDays.value)
-  const rangeParams = { fromTimestamp: from.toISOString() }
-  try {
-    // 首批 limit=50 快速展示
-    const res = await fetchTraces({ limit: 50, ...rangeParams })
-    if (seq !== loadSeq) return
-    traces.value = res.data
-    loading.value = false
-
-    // 后台静默补全剩余页（cursor 翻页，最多 5 次）
-    if (res.meta.hasMore) {
-      fetchingMore.value = true
-      try {
-        let cursor = res.meta.nextCursor
-        let pages = 0
-        while (cursor && pages < 5) {
-          const more = await fetchTraces({ limit: 50, cursor, ...rangeParams })
-          if (seq !== loadSeq) return
-          traces.value.push(...more.data)
-          cursor = more.meta.nextCursor
-          pages++
-          if (!more.meta.hasMore) break
-        }
-      } catch (e) {
-        console.error('后台翻页失败:', e)
-      } finally {
-        if (seq === loadSeq) fetchingMore.value = false
-      }
-    }
-  } catch (e: any) {
-    if (seq !== loadSeq) return
-    loading.value = false
-    loadError.value = e.message || '加载失败'
-    message.error('数据加载失败，请重试')
-    console.error(e)
-  }
-}
-
 onMounted(load)
-watch(rangeDays, load)
 </script>
 
 <template>
   <!-- 首次加载骨架屏 -->
-  <div v-if="loading" class="skeleton-wrap">
+  <div v-if="firstLoading" class="skeleton-wrap">
     <div class="skeleton-cards">
       <a-skeleton-input v-for="i in 4" :key="i" active size="large" style="height: 88px; width: 100%;" />
     </div>
@@ -151,7 +54,7 @@ watch(rangeDays, load)
   </div>
 
   <!-- 加载失败 + 重试 -->
-  <div v-else-if="loadError && !traces.length" class="error-state">
+  <div v-else-if="loadError && !stats" class="error-state">
     <div class="error-icon">⚠️</div>
     <div class="error-title">数据加载失败</div>
     <div class="error-desc">{{ loadError }}</div>
@@ -159,86 +62,86 @@ watch(rangeDays, load)
   </div>
 
   <!-- 正常面板 -->
-  <div v-else class="dashboard">
+  <div v-else-if="stats" class="dashboard">
     <div class="stat-cards">
-      <StatCard title="今日调用次数" :value="todayCount" suffix="次" icon="📡" />
-      <StatCard :title="`最近${rangeDays}天总调用`" :value="traces.length" suffix="次" icon="📈" />
-      <StatCard title="平均耗时(今日)" :value="avgLatency" suffix="秒" icon="⏱️" />
-      <StatCard title="任务类型数" :value="byName.length" suffix="种" icon="🏷️" />
+      <StatCard title="今日调用次数" :value="stats.todayCalls" suffix="次" icon="📡" />
+      <StatCard :title="`最近${stats.days}天总调用`" :value="stats.totalCalls" suffix="次" icon="📈" />
+      <StatCard :title="`平均耗时(近${stats.days}天)`" :value="stats.avgLatencySec" suffix="秒" icon="⏱️" />
+      <StatCard title="任务类型数" :value="stats.byName.length" suffix="种" icon="🏷️" />
     </div>
 
     <!-- Token 用量六项明细 -->
     <a-card style="margin-top: 16px;">
-      <template #title>🔤 Token 用量（近 {{ rangeDays }} 天）</template>
+      <template #title>🔤 Token 用量（近 {{ stats.days }} 天）</template>
       <template #extra>
-        <a-radio-group v-model:value="rangeDays" size="small" button-style="solid" class="range-switch">
+        <a-radio-group
+          :value="rangeDays"
+          size="small"
+          button-style="solid"
+          class="range-switch"
+          :disabled="rangeLoading"
+          @update:value="(v: number) => { rangeDays = v; load() }"
+        >
           <a-radio-button :value="7">7天</a-radio-button>
           <a-radio-button :value="30">30天</a-radio-button>
         </a-radio-group>
+        <a-spin v-if="rangeLoading" size="small" style="margin-right: 10px;" />
         <a-tag v-if="cacheHitRate !== null && cacheHitRate > 0" color="green">
           ⚡ 缓存命中 {{ cacheHitRate }}%
         </a-tag>
-        <a-tag color="blue">总计 {{ fmt(tokenStats.total) }}</a-tag>
+        <a-tag color="blue">总计 {{ fmt(tokenStats?.total) }}</a-tag>
       </template>
       <div class="token-grid">
         <div class="token-cell">
           <span class="token-label">📥 输入</span>
-          <span class="token-num">{{ fmt(tokenStats.input) }}</span>
+          <span class="token-num">{{ fmt(tokenStats?.input) }}</span>
         </div>
         <div class="token-cell">
           <span class="token-label">⚡ 输入缓存</span>
-          <span class="token-num token-cache">{{ fmt(tokenStats.cache) }}</span>
+          <span class="token-num token-cache">{{ fmt(tokenStats?.cache) }}</span>
         </div>
         <div class="token-cell token-sum">
           <span class="token-label">Σ 总输入</span>
-          <span class="token-num">{{ fmt(tokenStats.totalInput) }}</span>
+          <span class="token-num">{{ fmt(tokenStats?.totalInput) }}</span>
         </div>
         <div class="token-cell">
           <span class="token-label">📤 输出</span>
-          <span class="token-num">{{ fmt(tokenStats.output) }}</span>
+          <span class="token-num">{{ fmt(tokenStats?.output) }}</span>
         </div>
         <div class="token-cell">
           <span class="token-label">🧠 思考</span>
-          <span class="token-num token-think">{{ fmt(tokenStats.reasoning) }}</span>
+          <span class="token-num token-think">{{ fmt(tokenStats?.reasoning) }}</span>
         </div>
         <div class="token-cell token-sum">
           <span class="token-label">Σ 总输出</span>
-          <span class="token-num">{{ fmt(tokenStats.totalOutput) }}</span>
+          <span class="token-num">{{ fmt(tokenStats?.totalOutput) }}</span>
         </div>
-      </div>
-      <div v-if="fetchingMore" class="token-note">
-        <a-spin size="small" /> 后台仍在加载更多数据，以上为已加载部分的统计…
       </div>
     </a-card>
 
     <a-row :gutter="[16, { xs: 12, sm: 16, lg: 16 }]" style="margin-top: 16px;">
       <a-col :xs="24" :lg="14">
-        <a-card :title="`最近 ${rangeDays} 天调用量趋势`">
-          <TrendChart :data="trend" />
+        <a-card :title="`最近 ${stats.days} 天调用量趋势`">
+          <TrendChart :data="stats.trend" />
         </a-card>
       </a-col>
       <a-col :xs="24" :lg="10">
         <a-card title="任务类型分布">
-          <NameChart :data="byName" />
+          <NameChart :data="topNames" />
         </a-card>
       </a-col>
     </a-row>
 
     <a-card style="margin-top: 16px;">
       <template #title>任务类型明细</template>
-      <template #extra>
-        <span v-if="fetchingMore" class="loading-more">
-          <a-spin size="small" /> 加载更多...
-        </span>
-      </template>
-      <div v-if="!byName.length" class="empty-inline">
+      <div v-if="!stats.byName.length" class="empty-inline">
         <div class="empty-inline-icon">📭</div>
         <div class="empty-inline-text">暂无调用数据</div>
       </div>
       <a-table
         v-else
-        :data-source="byName.map(([name, count]) => ({ name, count }))"
-        :pagination="false"
+        :data-source="stats.byName.map(([name, count]) => ({ name, count }))"
+        :pagination="{ pageSize: 10, size: 'small' }"
         size="small"
       >
         <a-table-column title="任务名称" data-index="name" />
@@ -314,23 +217,6 @@ watch(rangeDays, load)
 }
 .token-cache { color: var(--success); }
 .token-think { color: #9254DE; }
-.token-note {
-  margin-top: 12px;
-  font-size: 12px;
-  color: var(--text-tertiary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-/* 加载更多提示 */
-.loading-more {
-  font-size: 12px;
-  color: var(--text-tertiary);
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
 
 /* 内联空状态 */
 .empty-inline {

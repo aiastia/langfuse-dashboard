@@ -1,23 +1,28 @@
 <script setup lang="ts">
-import { ref, onMounted, reactive } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
 import { useLangfuse } from '../composables/useLangfuse'
 import type { SlimTrace } from '../types'
 import TraceDrawer from '../components/TraceDrawer.vue'
 
 const { fetchTraces } = useLangfuse()
+const PAGE_SIZE = 50
 const loading = ref(false)
 const traces = ref<SlimTrace[]>([])
+const page = ref(1)
 const hasMore = ref(false)
-const nextCursor = ref<string | null>(null)
+// pageCursors[i] = 拉取第 i+1 页要传的 cursor（第 1 页为 null）。
+// v2 API 只有 cursor 分页没有页码跳转，靠这根游标栈实现"回到上一页"。
+let pageCursors: (string | null)[] = [null]
 
 const filters = reactive({
   name: '' as string,
   dateRange: [] as string[],
 })
 
-// 任务类型选项（从已加载数据动态提取）
+// 任务类型选项（跨已浏览页累积，切筛选/刷新时清空）
 const nameOptions = ref<string[]>([])
+const nameSet = new Set<string>()
 
 const selectedTraceId = ref('')
 const drawerOpen = ref(false)
@@ -59,31 +64,29 @@ function formatTime(iso: string) {
   return `${d.getMonth() + 1}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-async function load(reset = true) {
-  loading.value = true
-  if (reset) {
-    traces.value = []
-    nextCursor.value = null
+function buildQuery(cursor: string | null) {
+  const query: any = { limit: PAGE_SIZE }
+  if (cursor) query.cursor = cursor
+  if (filters.name) query.name = filters.name
+  if (filters.dateRange?.length === 2) {
+    query.fromTimestamp = new Date(filters.dateRange[0]).toISOString()
+    query.toTimestamp = new Date(filters.dateRange[1] + 'T23:59:59').toISOString()
   }
+  return query
+}
+
+async function loadPage(p: number) {
+  loading.value = true
   try {
-    const query: any = { limit: 50 }
-    if (!reset && nextCursor.value) query.cursor = nextCursor.value
-    if (filters.name) query.name = filters.name
-    if (filters.dateRange?.length === 2) {
-      query.fromTimestamp = new Date(filters.dateRange[0]).toISOString()
-      query.toTimestamp = new Date(filters.dateRange[1] + 'T23:59:59').toISOString()
-    }
-    const res = await fetchTraces(query)
-    if (reset) {
-      traces.value = res.data
-    } else {
-      traces.value.push(...res.data)
-    }
-    nextCursor.value = res.meta.nextCursor
+    const res = await fetchTraces(buildQuery(pageCursors[p - 1] ?? null))
+    traces.value = res.data
     hasMore.value = res.meta.hasMore
-    // 提取任务类型选项
-    const names = new Set(traces.value.map((t) => t.name))
-    nameOptions.value = [...names]
+    // 记录下一页游标，截断翻页途中残留的更靠后的旧游标
+    pageCursors[p] = res.meta.nextCursor
+    pageCursors = pageCursors.slice(0, p + 1)
+    page.value = p
+    res.data.forEach((t) => nameSet.add(t.name))
+    nameOptions.value = [...nameSet]
   } catch (e: any) {
     message.error('数据加载失败，请重试')
     console.error(e)
@@ -92,16 +95,32 @@ async function load(reset = true) {
   }
 }
 
-function loadMore() {
-  load(false)
+/** 筛选/刷新：重置回第 1 页 */
+function reset() {
+  pageCursors = [null]
+  nameSet.clear()
+  nameOptions.value = []
+  loadPage(1)
 }
+
+function onPageChange(p: number) {
+  if (p === page.value) return
+  // 游标分页只能顺次往后拿：simple 分页框手输"未到过的页"时只能给下一页，
+  // 往回翻则游标栈里有记录，随便回
+  const target = Math.min(p, page.value + 1)
+  loadPage(target)
+}
+
+// a-pagination 靠 total 推算总页数；游标分页没有总数，
+// 有下一页时多给一页的量让"下一页"保持可点，到末页时刚好禁用
+const pagerTotal = computed(() => page.value * PAGE_SIZE + (hasMore.value ? PAGE_SIZE : 0))
 
 function onRowClick(record: SlimTrace) {
   selectedTraceId.value = record.id
   drawerOpen.value = true
 }
 
-onMounted(() => load(true))
+onMounted(() => loadPage(1))
 </script>
 
 <template>
@@ -113,12 +132,12 @@ onMounted(() => load(true))
         placeholder="任务类型"
         allow-clear
         class="filter-select"
-        @change="load(true)"
+        @change="reset"
       >
         <a-select-option v-for="n in nameOptions" :key="n" :value="n">{{ n }}</a-select-option>
       </a-select>
-      <a-range-picker v-model:value="filters.dateRange" @change="load(true)" />
-      <a-button @click="load(true)">🔄 刷新</a-button>
+      <a-range-picker v-model:value="filters.dateRange" @change="reset" />
+      <a-button @click="reset">🔄 刷新</a-button>
     </div>
 
     <a-table
@@ -178,25 +197,23 @@ onMounted(() => load(true))
       </template>
     </div>
 
-    <!-- 加载更多 / 分页底部 -->
+    <!-- 底部：空状态 + 页码翻页 -->
     <div class="list-footer">
       <div v-if="!traces.length && !loading" class="empty-inline">
         <div class="empty-inline-icon">📭</div>
         <div class="empty-inline-text">暂无调用记录</div>
       </div>
-      <a-button
-        v-if="hasMore && traces.length"
-        type="default"
-        block
-        :loading="loading"
-        class="load-more-btn"
-        @click="loadMore"
-      >
-        加载更多
-      </a-button>
-      <div v-if="!hasMore && traces.length" class="list-end">
-        已加载全部 {{ traces.length }} 条记录
-      </div>
+      <template v-else>
+        <a-pagination
+          simple
+          :current="page"
+          :page-size="PAGE_SIZE"
+          :total="pagerTotal"
+          :disabled="loading"
+          @change="onPageChange"
+        />
+        <div class="pager-hint">第 {{ page }} 页 · 本页 {{ traces.length }} 条</div>
+      </template>
     </div>
   </a-card>
 
@@ -227,15 +244,10 @@ onMounted(() => load(true))
   margin-top: 16px;
   text-align: center;
 }
-.load-more-btn {
-  max-width: 240px;
-  margin: 0 auto;
-  border-radius: var(--radius-md);
-}
-.list-end {
-  font-size: 13px;
+.pager-hint {
+  margin-top: 6px;
+  font-size: 12px;
   color: var(--text-tertiary);
-  padding: 8px 0;
 }
 
 /* 内联空状态 */
