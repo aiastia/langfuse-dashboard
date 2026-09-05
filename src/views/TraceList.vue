@@ -1,28 +1,30 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue'
 import { message } from 'ant-design-vue'
+import dayjs from 'dayjs'
 import { useLangfuse } from '../composables/useLangfuse'
-import type { SlimTrace } from '../types'
+import type { SlimTrace, TokenBreakdown } from '../types'
 import TraceDrawer from '../components/TraceDrawer.vue'
 
 const { fetchTraces } = useLangfuse()
-const PAGE_SIZE = 50
+const PAGE_LIMIT = 50
 const loading = ref(false)
+const loadingMore = ref(false)
 const traces = ref<SlimTrace[]>([])
-const page = ref(1)
 const hasMore = ref(false)
-// pageCursors[i] = 拉取第 i+1 页要传的 cursor（第 1 页为 null）。
-// v2 API 只有 cursor 分页没有页码跳转，靠这根游标栈实现"回到上一页"。
-let pageCursors: (string | null)[] = [null]
+const cursor = ref<string | null>(null) // 本日内"加载更多"的翻页游标
+
+// 按天分页：一天一页，selectedDate 就是当前页
+const selectedDate = ref(dayjs().format('YYYY-MM-DD'))
+const isToday = computed(() => selectedDate.value === dayjs().format('YYYY-MM-DD'))
+const dateLabel = computed(() => dayjs(selectedDate.value).format('M月D日'))
 
 const filters = reactive({
   name: '' as string,
-  dateRange: [] as string[],
 })
 
-// 任务类型选项（跨已浏览页累积，切筛选/刷新时清空）
+// 任务类型选项（跨浏览过的天累积）
 const nameOptions = ref<string[]>([])
-const nameSet = new Set<string>()
 
 const selectedTraceId = ref('')
 const drawerOpen = ref(false)
@@ -64,29 +66,36 @@ function formatTime(iso: string) {
   return `${d.getMonth() + 1}/${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-function buildQuery(cursor: string | null) {
-  const query: any = { limit: PAGE_SIZE }
-  if (cursor) query.cursor = cursor
-  if (filters.name) query.name = filters.name
-  if (filters.dateRange?.length === 2) {
-    query.fromTimestamp = new Date(filters.dateRange[0]).toISOString()
-    query.toTimestamp = new Date(filters.dateRange[1] + 'T23:59:59').toISOString()
+/** 当前天 + 名称筛选对应的查询参数（本地时区的一天） */
+function rangeParams() {
+  const d = dayjs(selectedDate.value)
+  const p: Record<string, string> = {
+    fromTimestamp: d.startOf('day').toISOString(),
+    toTimestamp: d.endOf('day').toISOString(),
   }
-  return query
+  if (filters.name) p.name = filters.name
+  return p
 }
 
-async function loadPage(p: number) {
+function collectNames() {
+  const s = new Set(nameOptions.value)
+  traces.value.forEach((t) => s.add(t.name))
+  nameOptions.value = [...s]
+}
+
+/** 加载某一天（切换日期页） */
+async function loadDay(dateStr: string) {
   loading.value = true
+  selectedDate.value = dateStr
+  traces.value = []
+  hasMore.value = false
+  cursor.value = null
   try {
-    const res = await fetchTraces(buildQuery(pageCursors[p - 1] ?? null))
+    const res = await fetchTraces({ limit: PAGE_LIMIT, ...rangeParams() })
     traces.value = res.data
     hasMore.value = res.meta.hasMore
-    // 记录下一页游标，截断翻页途中残留的更靠后的旧游标
-    pageCursors[p] = res.meta.nextCursor
-    pageCursors = pageCursors.slice(0, p + 1)
-    page.value = p
-    res.data.forEach((t) => nameSet.add(t.name))
-    nameOptions.value = [...nameSet]
+    cursor.value = res.meta.nextCursor
+    collectNames()
   } catch (e: any) {
     message.error('数据加载失败，请重试')
     console.error(e)
@@ -95,49 +104,128 @@ async function loadPage(p: number) {
   }
 }
 
-/** 筛选/刷新：重置回第 1 页 */
-function reset() {
-  pageCursors = [null]
-  nameSet.clear()
-  nameOptions.value = []
-  loadPage(1)
+/** 同一 trace 的两段用量相加（跨页截断合并用） */
+function mergeUsage(a: TokenBreakdown, b: TokenBreakdown): TokenBreakdown {
+  const out: any = { ...a }
+  for (const k of Object.keys(a) as (keyof TokenBreakdown)[]) out[k] = a[k] + b[k]
+  return out
 }
 
-function onPageChange(p: number) {
-  if (p === page.value) return
-  // 游标分页只能顺次往后拿：simple 分页框手输"未到过的页"时只能给下一页，
-  // 往回翻则游标栈里有记录，随便回
-  const target = Math.min(p, page.value + 1)
-  loadPage(target)
+/** 本日加载更多：上游游标按 observation 行推进，
+ *  一个 trace 的后半截会出现在下一批 —— 按 id 合并回已有条目 */
+async function loadMore() {
+  if (!cursor.value || loadingMore.value) return
+  loadingMore.value = true
+  try {
+    const res = await fetchTraces({ limit: PAGE_LIMIT, cursor: cursor.value, ...rangeParams() })
+    const byId = new Map(traces.value.map((t) => [t.id, t]))
+    const appended: SlimTrace[] = []
+    for (const t of res.data) {
+      const prev = byId.get(t.id)
+      if (prev) {
+        prev.usage = mergeUsage(prev.usage, t.usage)
+        prev.observationCount += t.observationCount
+        prev.totalCost += t.totalCost
+      } else {
+        byId.set(t.id, t)
+        appended.push(t)
+      }
+    }
+    traces.value.push(...appended)
+    traces.value.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))
+    hasMore.value = res.meta.hasMore
+    cursor.value = res.meta.nextCursor
+    collectNames()
+  } catch (e: any) {
+    message.error('数据加载失败，请重试')
+    console.error(e)
+  } finally {
+    loadingMore.value = false
+  }
 }
 
-// a-pagination 靠 total 推算总页数；游标分页没有总数，
-// 有下一页时多给一页的量让"下一页"保持可点，到末页时刚好禁用
-const pagerTotal = computed(() => page.value * PAGE_SIZE + (hasMore.value ? PAGE_SIZE : 0))
+function shiftDay(n: number) {
+  loadDay(dayjs(selectedDate.value).add(n, 'day').format('YYYY-MM-DD'))
+}
+
+function goToday() {
+  loadDay(dayjs().format('YYYY-MM-DD'))
+}
+
+function onDateChange(ds: any) {
+  if (ds) loadDay(String(ds))
+}
+
+/** 禁选未来日期 */
+function disabledDate(d: any) {
+  return d && d.isAfter(dayjs(), 'day')
+}
+
+/** 首次进入：今天没记录就往前找，最多回看 7 天，定位到最近有调用的一天 */
+async function init() {
+  loading.value = true
+  let d = dayjs()
+  try {
+    for (let i = 0; i < 8; i++) {
+      const res = await fetchTraces({
+        limit: PAGE_LIMIT,
+        fromTimestamp: d.startOf('day').toISOString(),
+        toTimestamp: d.endOf('day').toISOString(),
+        ...(filters.name ? { name: filters.name } : {}),
+      })
+      if (res.data.length || res.meta.hasMore) {
+        selectedDate.value = d.format('YYYY-MM-DD')
+        traces.value = res.data
+        hasMore.value = res.meta.hasMore
+        cursor.value = res.meta.nextCursor
+        if (i > 0) message.info(`今天暂无调用，已定位到最近有记录的 ${d.format('M月D日')}`)
+        collectNames()
+        break
+      }
+      d = d.subtract(1, 'day')
+    }
+  } catch (e: any) {
+    message.error('数据加载失败，请重试')
+    console.error(e)
+  } finally {
+    loading.value = false
+  }
+}
 
 function onRowClick(record: SlimTrace) {
   selectedTraceId.value = record.id
   drawerOpen.value = true
 }
 
-onMounted(() => loadPage(1))
+onMounted(init)
 </script>
 
 <template>
   <a-card>
-    <!-- 筛选栏 -->
+    <!-- 筛选栏：按天翻页 + 任务类型 -->
     <div class="filter-bar">
+      <div class="day-nav">
+        <a-button :disabled="loading" @click="shiftDay(-1)">‹ 前一天</a-button>
+        <a-date-picker
+          :value="selectedDate"
+          value-format="YYYY-MM-DD"
+          :allow-clear="false"
+          :disabled-date="disabledDate"
+          @change="onDateChange"
+        />
+        <a-button :disabled="isToday || loading" @click="shiftDay(1)">后一天 ›</a-button>
+        <a-button :disabled="isToday || loading" @click="goToday">今天</a-button>
+      </div>
       <a-select
         v-model:value="filters.name"
         placeholder="任务类型"
         allow-clear
         class="filter-select"
-        @change="reset"
+        @change="loadDay(selectedDate)"
       >
         <a-select-option v-for="n in nameOptions" :key="n" :value="n">{{ n }}</a-select-option>
       </a-select>
-      <a-range-picker v-model:value="filters.dateRange" @change="reset" />
-      <a-button @click="reset">🔄 刷新</a-button>
+      <a-button @click="loadDay(selectedDate)">🔄 刷新</a-button>
     </div>
 
     <a-table
@@ -197,23 +285,25 @@ onMounted(() => loadPage(1))
       </template>
     </div>
 
-    <!-- 底部：空状态 + 页码翻页 -->
+    <!-- 底部：空状态 + 本日加载更多 -->
     <div class="list-footer">
       <div v-if="!traces.length && !loading" class="empty-inline">
         <div class="empty-inline-icon">📭</div>
-        <div class="empty-inline-text">暂无调用记录</div>
+        <div class="empty-inline-text">{{ dateLabel }} 暂无调用记录</div>
       </div>
-      <template v-else>
-        <a-pagination
-          simple
-          :current="page"
-          :page-size="PAGE_SIZE"
-          :total="pagerTotal"
-          :disabled="loading"
-          @change="onPageChange"
-        />
-        <div class="pager-hint">第 {{ page }} 页 · 本页 {{ traces.length }} 条</div>
-      </template>
+      <a-button
+        v-if="hasMore && (traces.length || !loading)"
+        type="default"
+        block
+        :loading="loadingMore"
+        class="load-more-btn"
+        @click="loadMore"
+      >
+        加载本日更多
+      </a-button>
+      <div v-else-if="traces.length" class="list-end">
+        {{ dateLabel }} 已加载全部 {{ traces.length }} 条
+      </div>
     </div>
   </a-card>
 
@@ -227,6 +317,12 @@ onMounted(() => loadPage(1))
   margin-bottom: 16px;
   flex-wrap: wrap;
   align-items: center;
+}
+.day-nav {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 .filter-select { width: 200px; }
 .trace-name {
@@ -244,10 +340,15 @@ onMounted(() => loadPage(1))
   margin-top: 16px;
   text-align: center;
 }
-.pager-hint {
-  margin-top: 6px;
-  font-size: 12px;
+.load-more-btn {
+  max-width: 240px;
+  margin: 0 auto;
+  border-radius: var(--radius-md);
+}
+.list-end {
+  font-size: 13px;
   color: var(--text-tertiary);
+  padding: 8px 0;
 }
 
 /* 内联空状态 */
@@ -268,8 +369,8 @@ onMounted(() => loadPage(1))
     align-items: stretch;
     gap: 8px;
   }
+  .day-nav :deep(.ant-picker) { flex: 1; }
   .filter-select { width: 100%; }
-  .filter-bar :deep(.ant-picker) { width: 100%; }
 
   /* 768px 以下：隐藏横向滚动表格，切换为卡片列表 */
   .desktop-table { display: none; }

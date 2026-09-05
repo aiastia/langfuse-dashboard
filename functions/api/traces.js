@@ -62,7 +62,9 @@ async function fetchTracesFromV2(env, opts) {
   const { traceLimit, cursor, name, userId, fromTimestamp, toTimestamp } = opts;
 
   const obsPerRequest = Math.min(traceLimit * 3, 100); // 每 trace 约 2-3 个 observation
-  const maxPages = 3; // 最多翻 3 页，控制单次请求总耗时
+  const maxPages = 6; // 最多翻 6 页（CF 免费 50 子请求/次限制内）。
+  // 按天查询时一天可能有几千行 observation（业务端每 trace 约 70 行），
+  // 翻浅了单次请求只装得下三四个 trace，前端"加载更多"会非常迟钝
 
   // 按 traceId 分组收集 observation 行
   const traceMap = new Map(); // traceId → observation[]
