@@ -59,14 +59,15 @@ export function error(msg, status = 500) {
  * @param {string} key   缓存键（通常是请求参数序列化后的字符串）
  * @param {number} ttl   存活时间（毫秒）
  * @param {() => Promise<any>} fetcher  未命中时的数据获取函数
+ * @param {boolean} [force]  true=跳过读缓存直接拉新数据并回写（刷新按钮用）
  * @returns {Promise<{data: any, cacheHit: boolean}>}
  */
-export async function cached(key, ttl, fetcher) {
+export async function cached(key, ttl, fetcher, force = false) {
   globalThis.__LF_CACHE__ = globalThis.__LF_CACHE__ || new Map();
   const store = globalThis.__LF_CACHE__;
   const now = Date.now();
   const entry = store.get(key);
-  if (entry && entry.expire > now) {
+  if (!force && entry && entry.expire > now) {
     return { data: entry.data, cacheHit: true };
   }
   const data = await fetcher();
@@ -81,13 +82,16 @@ export async function cached(key, ttl, fetcher) {
 /**
  * L2 持久缓存（CF Cache API，跨 isolate 存活，同机房生效）。
  * L1 请外层自行套 cached()。命中 L2 不消耗上游 API 配额。
- * 用法见 api/stats.js 与 api/traces.js。
+ * force=true 时跳过读、拉新后回写同键条目（刷新按钮拿真数据，
+ * 且刷新结果对后续普通访问可见）。用法见 api/stats.js 与 api/traces.js。
  */
-export async function cachedPersist(key, ttlSec, fetcher) {
+export async function cachedPersist(key, ttlSec, fetcher, force = false) {
   const cache = caches.default;
   const req = new Request(`https://cache.internal/${key}`);
-  const hit = await cache.match(req);
-  if (hit) return hit.json();
+  if (!force) {
+    const hit = await cache.match(req);
+    if (hit) return hit.json();
+  }
   const value = await fetcher();
   const resp = new Response(JSON.stringify(value), {
     headers: { 'Cache-Control': `public, max-age=${ttlSec}` },

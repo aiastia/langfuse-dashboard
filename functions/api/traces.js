@@ -22,7 +22,9 @@ import {
  *   - name → name（observation name 近似匹配）
  *   - userId → userId
  *
- *  缓存：L1 isolate 内存 30 秒 + L2 持久缓存（历史天 1 小时 / 含今天 60 秒）。
+ *  缓存：L1 isolate 内存 30 秒 + L2 持久缓存（历史天 1 小时 / 含今天 5 分钟）。
+ *  前端只在首次浏览某天时才发请求（其余走前端日缓存），
+ *  刷新按钮带 _ 参数：穿透 L1/L2 拉真数据并回写缓存键。
  */
 export async function onRequestGet(ctx) {
   const { env } = ctx;
@@ -42,14 +44,25 @@ export async function onRequestGet(ctx) {
     JSON.stringify({ traceLimit, cursor, name, userId, fromTimestamp, toTimestamp });
 
   try {
-    // L2 持久缓存：按天查的历史天数据不会再变，缓存 1 小时；
-    // 含今天/无时间范围的查询 60 秒。命中后不再调上游，冷启动也快
+    // L2 持久缓存：历史天数据不会再变，缓存 1 小时；今天 5 分钟
+    // （前端只在首次浏览/点刷新时才发请求，平时翻页纯走前端日缓存）。
+    // _ 参数=强制刷新：跳过 L1/L2 拉真数据，并回写到常规缓存键
     const rangeOver = toTimestamp && new Date(toTimestamp).getTime() < Date.now();
-    const l2Ttl = rangeOver ? 3600 : 60;
-    const { data } = await cached(cacheKey, 30000, () =>
-      cachedPersist(`traces?${cacheKey}`, l2Ttl, () =>
-        fetchTracesFromV2(env, { traceLimit, cursor, name, userId, fromTimestamp, toTimestamp })
-      )
+    const l2Ttl = rangeOver ? 3600 : 300;
+    const fresh = url.searchParams.has('_');
+    const { data } = await cached(
+      cacheKey,
+      30000,
+      () =>
+        // fresh 也要传给 L2：否则强制刷新只穿透了 L1，L2 命中依旧返回旧数据
+        cachedPersist(
+          `traces?${cacheKey}`,
+          l2Ttl,
+          () =>
+            fetchTracesFromV2(env, { traceLimit, cursor, name, userId, fromTimestamp, toTimestamp }),
+          fresh
+        ),
+      fresh
     );
     return json(data, 200, { 'Cache-Control': 'public, max-age=30' });
   } catch (e) {
