@@ -79,6 +79,24 @@ export async function cached(key, ttl, fetcher) {
 }
 
 /**
+ * L2 持久缓存（CF Cache API，跨 isolate 存活，同机房生效）。
+ * L1 请外层自行套 cached()。命中 L2 不消耗上游 API 配额。
+ * 用法见 api/stats.js 与 api/traces.js。
+ */
+export async function cachedPersist(key, ttlSec, fetcher) {
+  const cache = caches.default;
+  const req = new Request(`https://cache.internal/${key}`);
+  const hit = await cache.match(req);
+  if (hit) return hit.json();
+  const value = await fetcher();
+  const resp = new Response(JSON.stringify(value), {
+    headers: { 'Cache-Control': `public, max-age=${ttlSec}` },
+  });
+  await cache.put(req, resp);
+  return value;
+}
+
+/**
  * 从 v2 observation 行解析 6 项 token 用量拆解。
  *
  * Langfuse 约定（model-usage-and-cost 文档）：

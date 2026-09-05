@@ -3,6 +3,7 @@ import {
   json,
   error,
   cached,
+  cachedPersist,
   slimTraceFromObservations,
 } from '../_langfuse.js';
 
@@ -21,7 +22,7 @@ import {
  *   - name → name（observation name 近似匹配）
  *   - userId → userId
  *
- *  带 30 秒短时缓存。
+ *  缓存：L1 isolate 内存 30 秒 + L2 持久缓存（历史天 1 小时 / 含今天 60 秒）。
  */
 export async function onRequestGet(ctx) {
   const { env } = ctx;
@@ -41,8 +42,14 @@ export async function onRequestGet(ctx) {
     JSON.stringify({ traceLimit, cursor, name, userId, fromTimestamp, toTimestamp });
 
   try {
+    // L2 持久缓存：按天查的历史天数据不会再变，缓存 1 小时；
+    // 含今天/无时间范围的查询 60 秒。命中后不再调上游，冷启动也快
+    const rangeOver = toTimestamp && new Date(toTimestamp).getTime() < Date.now();
+    const l2Ttl = rangeOver ? 3600 : 60;
     const { data } = await cached(cacheKey, 30000, () =>
-      fetchTracesFromV2(env, { traceLimit, cursor, name, userId, fromTimestamp, toTimestamp })
+      cachedPersist(`traces?${cacheKey}`, l2Ttl, () =>
+        fetchTracesFromV2(env, { traceLimit, cursor, name, userId, fromTimestamp, toTimestamp })
+      )
     );
     return json(data, 200, { 'Cache-Control': 'public, max-age=30' });
   } catch (e) {

@@ -1,4 +1,4 @@
-import { langfuseFetch, json, error, cached } from '../_langfuse.js';
+import { langfuseFetch, json, error, cached, cachedPersist } from '../_langfuse.js';
 
 /**
  * GET /api/stats — 看板统计数据（服务端聚合，官方 v2 Metrics API）
@@ -70,23 +70,6 @@ async function metricsQuery(env, query) {
     { query: JSON.stringify(query) }
   );
   return resp.data || [];
-}
-
-/**
- * L2 持久缓存（CF Cache API，跨 isolate 存活）。
- * L1 是外层调用方套的 cached()。命中 L2 不消耗 Langfuse 配额。
- */
-async function cachedPersist(key, ttlSec, fetcher) {
-  const cache = caches.default;
-  const req = new Request(`https://cache.internal/${key}`);
-  const hit = await cache.match(req);
-  if (hit) return hit.json();
-  const value = await fetcher();
-  const resp = new Response(JSON.stringify(value), {
-    headers: { 'Cache-Control': `public, max-age=${ttlSec}` },
-  });
-  await cache.put(req, resp);
-  return value;
 }
 
 /** 单日调用次数（去重 trace 数）。历史日 12h / 今日 2min 缓存，省配额 */

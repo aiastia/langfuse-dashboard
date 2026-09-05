@@ -56,6 +56,8 @@ export interface TraceQuery {
   fromTimestamp?: string
   toTimestamp?: string
   userId?: string
+  /** 缓存穿透参数：强制刷新时带时间戳改变 URL 绕开浏览器缓存，后端会忽略 */
+  _?: string
 }
 
 export function useLangfuse() {

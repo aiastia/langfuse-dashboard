@@ -29,6 +29,24 @@ const nameOptions = ref<string[]>([])
 const selectedTraceId = ref('')
 const drawerOpen = ref(false)
 
+/** 前端内存日缓存：翻来翻去看过的天秒开，不用每次都等接口 */
+interface DayPage {
+  traces: SlimTrace[]
+  hasMore: boolean
+  cursor: string | null
+}
+const dayCache = new Map<string, DayPage>()
+function cacheKeyFor(dateStr: string) {
+  return `${dateStr}|${filters.name || ''}`
+}
+
+function applyEntry(e: DayPage) {
+  traces.value = e.traces
+  hasMore.value = e.hasMore
+  cursor.value = e.cursor
+  collectNames()
+}
+
 // 书名映射（项目ID → 书名），未知 ID 直接显示原数字
 const BOOK_NAMES: Record<string, string> = {
   '31': '凶崽入门：全宗门跪求我别吞了',
@@ -83,25 +101,43 @@ function collectNames() {
   nameOptions.value = [...s]
 }
 
-/** 加载某一天（切换日期页） */
-async function loadDay(dateStr: string) {
-  loading.value = true
+/** 加载某一天（切换日期页）。force=true 跳过前端缓存重新拉 */
+async function loadDay(dateStr: string, force = false) {
   selectedDate.value = dateStr
+  const key = cacheKeyFor(dateStr)
+  const hit = dayCache.get(key)
+  if (hit && !force) {
+    applyEntry(hit)
+    return
+  }
+  loading.value = true
   traces.value = []
   hasMore.value = false
   cursor.value = null
   try {
-    const res = await fetchTraces({ limit: PAGE_LIMIT, ...rangeParams() })
-    traces.value = res.data
-    hasMore.value = res.meta.hasMore
-    cursor.value = res.meta.nextCursor
-    collectNames()
+    const res = await fetchTraces({
+      limit: PAGE_LIMIT,
+      ...rangeParams(),
+      ...(force ? { _: String(Date.now()) } : {}),
+    })
+    const entry: DayPage = {
+      traces: res.data,
+      hasMore: res.meta.hasMore,
+      cursor: res.meta.nextCursor,
+    }
+    dayCache.set(key, entry)
+    applyEntry(entry)
   } catch (e: any) {
     message.error('数据加载失败，请重试')
     console.error(e)
   } finally {
     loading.value = false
   }
+}
+
+/** 刷新按钮：绕开浏览器缓存 + 前端日缓存，重新拉当天 */
+function refresh() {
+  loadDay(selectedDate.value, true)
 }
 
 /** 同一 trace 的两段用量相加（跨页截断合并用） */
@@ -135,6 +171,12 @@ async function loadMore() {
     traces.value.sort((a, b) => (b.timestamp || '').localeCompare(a.timestamp || ''))
     hasMore.value = res.meta.hasMore
     cursor.value = res.meta.nextCursor
+    // 日缓存里的 traces 数组和页面是同一个引用，这里同步翻页状态即可
+    const entry = dayCache.get(cacheKeyFor(selectedDate.value))
+    if (entry) {
+      entry.hasMore = hasMore.value
+      entry.cursor = cursor.value
+    }
     collectNames()
   } catch (e: any) {
     message.error('数据加载失败，请重试')
@@ -175,11 +217,14 @@ async function init() {
       })
       if (res.data.length || res.meta.hasMore) {
         selectedDate.value = d.format('YYYY-MM-DD')
-        traces.value = res.data
-        hasMore.value = res.meta.hasMore
-        cursor.value = res.meta.nextCursor
+        const entry: DayPage = {
+          traces: res.data,
+          hasMore: res.meta.hasMore,
+          cursor: res.meta.nextCursor,
+        }
+        dayCache.set(cacheKeyFor(selectedDate.value), entry)
+        applyEntry(entry)
         if (i > 0) message.info(`今天暂无调用，已定位到最近有记录的 ${d.format('M月D日')}`)
-        collectNames()
         break
       }
       d = d.subtract(1, 'day')
@@ -225,7 +270,7 @@ onMounted(init)
       >
         <a-select-option v-for="n in nameOptions" :key="n" :value="n">{{ n }}</a-select-option>
       </a-select>
-      <a-button @click="loadDay(selectedDate)">🔄 刷新</a-button>
+      <a-button @click="refresh">🔄 刷新</a-button>
     </div>
 
     <a-table
